@@ -21,25 +21,87 @@ import * as T from './tools.js';
 export const name = 'dsh-plugin-adb';
 export const inject = ['tools'];
 
-async function loadDefineTool() {
+/**
+ * 解析宿主的 defineTool。
+ *
+ * 为什么不能只写一行 `import('@deepseek-ai/dsh-tools')`：
+ * 插件装在 `$DSH_HOME/profiles/<name>/node_modules/` 下，这个目录里**没有** dsh-tools，
+ * 而引擎自己的那份在 `/opt/dsh/node_modules/`。实测就是这个原因导致 apply 直接失败、
+ * 六个工具一个都没注册（diagnostics.md 里能查到 `cannot resolve @deepseek-ai/dsh-tools`）。
+ *
+ * 所以按顺序试：裸包名 → 环境变量 → 常见引擎根目录 → 从进程参数往上找。
+ */
+async function loadDefineTool(ctx) {
+  const tryImport = async (spec) => {
+    const mod = await import(spec);
+    return mod?.defineTool ? mod.defineTool : null;
+  };
+
+  // ① 宿主也许已经把 defineTool 递进来了，能不用解析就不用
+  const injected = ctx?.defineTool || ctx?.tools?.defineTool;
+  if (typeof injected === 'function') return injected;
+
+  // ② 裸包名（正常情况下走这条）
   try {
-    const mod = await import('@deepseek-ai/dsh-tools');
-    if (mod?.defineTool) return mod.defineTool;
-  } catch {
-    /* 本地开发时走环境变量 */
-  }
+    const d = await tryImport('@deepseek-ai/dsh-tools');
+    if (d) return d;
+  } catch { /* 继续 */ }
+
+  // ③ 环境变量（官方给本地开发留的口子）
   const override = process.env.DSH_TOOLS_PATH;
   if (override) {
-    const { pathToFileURL } = await import('node:url');
-    const mod = await import(pathToFileURL(override).href);
-    if (mod?.defineTool) return mod.defineTool;
+    try {
+      const { pathToFileURL } = await import('node:url');
+      const d = await tryImport(pathToFileURL(override).href);
+      if (d) return d;
+    } catch { /* 继续 */ }
   }
-  throw new Error('cannot resolve @deepseek-ai/dsh-tools (set DSH_TOOLS_PATH for local dev)');
+
+  // ④ 常见引擎根目录
+  const roots = [
+    process.env.DSH_ROOT,
+    '/opt/dsh',
+    '/usr/local/lib/dsh',
+    '/app',
+  ].filter(Boolean);
+  for (const root of roots) {
+    const entry = `${root}/node_modules/@deepseek-ai/dsh-tools/lib/index.js`;
+    try {
+      const { pathToFileURL } = await import('node:url');
+      const { existsSync } = await import('node:fs');
+      if (!existsSync(entry)) continue;
+      const d = await tryImport(pathToFileURL(entry).href);
+      if (d) return d;
+    } catch { /* 继续 */ }
+  }
+
+  // ⑤ 从进程参数/cwd 往上逐层找 node_modules
+  const { existsSync } = await import('node:fs');
+  const { dirname, join } = await import('node:path');
+  const { pathToFileURL } = await import('node:url');
+  const seeds = [process.argv?.[1], process.cwd()].filter(Boolean);
+  for (const seed of seeds) {
+    let dir = dirname(seed);
+    for (let i = 0; i < 8; i += 1) {
+      const entry = join(dir, 'node_modules/@deepseek-ai/dsh-tools/lib/index.js');
+      if (existsSync(entry)) {
+        try {
+          const d = await tryImport(pathToFileURL(entry).href);
+          if (d) return d;
+        } catch { /* 继续 */ }
+      }
+      const up = dirname(dir);
+      if (up === dir) break;
+      dir = up;
+    }
+  }
+
+  throw new Error('cannot resolve @deepseek-ai/dsh-tools (tried bare, DSH_TOOLS_PATH, /opt/dsh, cwd walk)');
 }
 
 export async function apply(ctx) {
   try {
-    const defineTool = await loadDefineTool();
+    const defineTool = await loadDefineTool(ctx);
     const defs = [
       [devicesSpec, () => T.devices()],
       [reconnectSpec, () => T.reconnect()],

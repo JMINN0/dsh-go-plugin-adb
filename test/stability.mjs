@@ -98,14 +98,23 @@ async function timed(fn) { const s = Date.now(); const v = await fn(); return [v
 }
 
 // T10 状态目录不可写时静默降级
+// 注意：**不能用 /proc/nope** —— 在 proot 里 mkdir 那个路径会永久挂起（实测 11 分钟不返回）。
+// 改成「拿一个普通文件当父目录」：mkdir 立刻抛 ENOTDIR，才是能验证的失败路径。
 {
+  const { mkdtemp, writeFile } = await import('node:fs/promises');
+  const { tmpdir } = await import('node:os');
+  const { join } = await import('node:path');
+  const dir = await mkdtemp(join(tmpdir(), 'adb-state-'));
+  const blocker = join(dir, 'notadir');
+  await writeFile(blocker, 'x');
   const old = process.env.DSH_ADB_STATE_DIR;
-  process.env.DSH_ADB_STATE_DIR = '/proc/nope';
+  process.env.DSH_ADB_STATE_DIR = join(blocker, 'sub');
   const mod = await import('../src/state.js?bust=' + Date.now());
-  let saved = null;
-  try { saved = await mod.save({ port: 1234 }); } catch (e) { saved = 'threw:' + e.message; }
+  let saved; let threw = null;
+  try { saved = await mod.save({ port: 1234 }); } catch (e) { threw = e.message; }
   process.env.DSH_ADB_STATE_DIR = old;
-  rec('T10 状态不可写不崩', typeof saved === 'object' || saved !== null, `返回 ${JSON.stringify(saved).slice(0, 40)}`);
+  rec('T10 状态不可写不崩', threw === null && typeof saved === 'object',
+    threw ? `抛异常: ${threw}` : `返回 ${JSON.stringify(saved).slice(0, 30)}`);
 }
 
 const dur = Date.now() - t0;

@@ -8,15 +8,42 @@ STATE="$STATE_DIR/state.json"
 say(){ printf '%s\n' "$*"; }
 
 port_of(){ [ -f "$STATE" ] && grep -o '"port"[[:space:]]*:[[:space:]]*[0-9]*' "$STATE" | grep -o '[0-9]*$' | head -1; }
-save(){ mkdir -p "$STATE_DIR"; printf '{\n  "port": %s,\n  "lastOkAt": %s\n}\n' "$1" "$(date +%s000)" > "$STATE"; }
+# 合并写：只改 port/lastOkAt，别把 reconnects/misses 这些统计抹掉
+save(){
+  mkdir -p "$STATE_DIR"
+  local tmp="$STATE.tmp"
+  if [ -f "$STATE" ]; then
+    sed -e "s/\"port\"[[:space:]]*:[[:space:]]*[0-9]*/\"port\": $1/" \
+        -e "s/\"lastOkAt\"[[:space:]]*:[[:space:]]*[0-9]*/\"lastOkAt\": $(date +%s000)/" "$STATE" > "$tmp"
+    grep -q '"port"' "$tmp" || printf '{\n  "port": %s,\n  "lastOkAt": %s\n}\n' "$1" "$(date +%s000)" > "$tmp"
+  else
+    printf '{\n  "port": %s,\n  "lastOkAt": %s\n}\n' "$1" "$(date +%s000)" > "$tmp"
+  fi
+  mv "$tmp" "$STATE"
+}
 
 # 过滤 emulator-* 假条目：adb 把 5554–5585 当模拟器段，connect 探测会凭空造出 emulator-55xx
 online(){ adb devices 2>/dev/null | awk 'NR>1 && $2=="device"{print $1}' | grep -v '^emulator-'; }
+
+# 重启后 adbd 回到无线调试的随机端口：从 mDNS 里把它捞出来
+mdns_ports(){ adb mdns services 2>/dev/null | grep -E '_adb-tls-(connect|pairing)' | sed -n 's/.*:\([0-9]\{2,5\}\)[[:space:]]*$/\1/p'; }
+try_mdns(){
+  local p
+  for p in $(mdns_ports); do
+    adb connect "127.0.0.1:$p" >/dev/null 2>&1; sleep 0.4
+    if usable "127.0.0.1:$p"; then
+      adb -s "127.0.0.1:$p" tcpip 5555 >/dev/null 2>&1; sleep 1.5
+      adb connect 127.0.0.1:5555 >/dev/null 2>&1; sleep 0.5
+      if usable 127.0.0.1:5555; then save 5555; say "OK  127.0.0.1:5555（mDNS 恢复）"; return 0; fi
+    fi
+  done
+  return 1
+}
 usable(){ adb -s "$1" shell id 2>/dev/null | grep -q 'uid=2000'; }
 
 try_ports(){
   local p saved; saved=$(port_of); 
-  for p in "$saved" 5555 6555 7555 8555; do
+  for p in "$saved" 5555 6555 7555 8555 9555; do
     [ -z "$p" ] && continue
     adb connect "127.0.0.1:$p" >/dev/null 2>&1; sleep 0.4
     if usable "127.0.0.1:$p"; then save "$p"; say "OK  127.0.0.1:$p  $(adb -s "127.0.0.1:$p" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"; return 0; fi
@@ -39,6 +66,7 @@ case "${1:-connect}" in
       break
     done
     try_ports && exit 0
+    try_mdns && exit 0
     say "连不上。一次性三步：开无线调试 → 把配对码+端口发我 → adb pair 后 adb tcpip 5555"
     exit 1 ;;
   repair) adb kill-server >/dev/null 2>&1; sleep 0.5; exec "$0" connect ;;

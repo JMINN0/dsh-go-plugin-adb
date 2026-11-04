@@ -83,6 +83,25 @@ async function candidates() {
  * 主入口：把连接弄好。
  * 返回 { ok, target, model, port, via, devices, hint }
  */
+/**
+ * 找一条**当前真的能用**的连接（已连上的设备，或 mDNS 广播的无线调试端口）。
+ * 迁移循环每轮都要重新调用：tcpip 之后旧 serial 立刻失效。
+ */
+async function findLiveTarget() {
+  await adb(['start-server']);
+  const { list } = await listDevices();
+  for (const d of list.filter((x) => x.state === 'device')) {
+    if (await usable(d.serial)) return d.serial;
+  }
+  for (const port of await mdnsPorts()) {
+    const t = `127.0.0.1:${port}`;
+    await adb(['connect', t], { timeout: 8000 });
+    await sleep(400);
+    if (await usable(t)) return t;
+  }
+  return null;
+}
+
 export async function ensure({ force = false } = {}) {
   const st = await state.load();
 
@@ -112,23 +131,15 @@ export async function ensure({ force = false } = {}) {
   }
 
   // 阶段二：直连全不通，但 mDNS 或已有条目找得到一条活连接 → 用它把端口固定下来。
-  let bootTarget = null;
-  for (const d of list.filter((x) => x.state === 'device' && !/^emulator-/.test(x.serial))) {
-    if (await usable(d.serial)) { bootTarget = d.serial; break; }
-  }
-  if (!bootTarget) {
-    for (const port of await mdnsPorts()) {
-      const t = `127.0.0.1:${port}`;
-      await adb(['connect', t], { timeout: 8000 });
-      await sleep(400);
-      if (await usable(t)) { bootTarget = t; break; }
-    }
-  }
+  const bootTarget = await findLiveTarget();
 
   if (bootTarget) {
     for (const port of cands) {
       const target = `127.0.0.1:${port}`;
-      await adb(['-s', bootTarget, 'tcpip', String(port)], { timeout: 12000 });
+      // tcpip 会让 adbd 在新端口重启，**原来那条 serial 当场失效**。
+      // 所以每轮都要重新找一条活连接，不能拿第一轮的 serial 一直用（否则第二轮起全是死连接）。
+      const live = (await findLiveTarget()) || bootTarget;
+      await adb(['-s', live, 'tcpip', String(port)], { timeout: 12000 });
       await sleep(1200);
       await adb(['connect', target], { timeout: 8000 });
       await sleep(400);
@@ -166,7 +177,10 @@ export async function withConn(fn, { retries = 1 } = {}) {
     const text = `${r.out || ''}${r.err ? `\n[stderr] ${r.err}` : ''}`.trim();
     if (r.ok) return { ok: true, text: text || '(无输出)', conn: c };
     last = { ok: false, text: text || '命令失败', conn: c };
-    const transient = /device offline|no devices|not found|closed|protocol fault/i.test(`${r.out}${r.err}`);
+    // 只认**连接层**的瞬时故障。'not found' 不能算：`nosuchcmd` 的报错就是
+    // "sh: nosuchcmd: not found"，把它当连接错误重试，等于同一条命令在真机上跑两遍（实测踩过）。
+    const transient = /device offline|no devices|device .*not found|protocol fault|connection reset|error: closed/i
+      .test(`${r.out}${r.err}`);
     if (!transient) return last;
     await state.save({ reconnects: (await state.load()).reconnects + 1 });
   }

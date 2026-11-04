@@ -1,46 +1,62 @@
 /**
  * tools.js — 六个工具的 execute。
  *
- * 全部返回 { text }，跟 tool-spec.js 的 output.schema 对上。
- * 任何一步失败都返回可读的原因和下一步，不抛异常——工具报错会把整轮对话打断。
+ * 三条硬规则（都是复核时踩出来的）：
+ * 1. **不许写死端口**。连接目标一律用 ensure()/withConn() 返回的 target；
+ *    写死 5555 会导致端口迁移之后 install/logcat/screencap 全部发给一个死地址。
+ * 2. **用户给的字串进 shell 之前必须校验**。`screencap -p "$(echo INJ)"` 在双引号里
+ *    照样会展开，实测能在真机上建出注入出来的文件名。所以路径只允许安全字符，
+ *    其他一律拒绝，不靠转义。
+ * 3. **危险命令拦截要按"命令位"判断**，并覆盖引号包起来的子命令（`pm "uninstall" x`）
+ *    和 `cmd package uninstall` 这种等价写法。
  */
 
-import { adb, ensure, listDevices, shell as adbShell, withConn } from './adb.js';
+import { adb } from './adb.js';
+import * as adbConn from './adb.js';
 
-const TARGET = process.env.ADB_TARGET || '127.0.0.1:5555';
-
-/** 这批命令会改用户数据/卸应用，必须显式确认。 */
+/** 会改用户数据/卸应用的命令，必须显式 confirm。 */
 const DANGEROUS = [
-  /(^|\s)pm\s+(uninstall|clear)\b/,
-  /(^|\s)pm\s+disable\b/,
-  /(^|\s)rm\s+(-\S+\s+)*\/(sdcard|storage|data)\//,
-  /(^|\s)(reboot|recovery)\b/,
+  /\bpm\s+["']?(uninstall|clear|disable)["']?\b/,
+  /\bcmd\s+package\s+["']?(uninstall|clear|disable)["']?\b/,
+  /\brm\s+(-\S+\s+)*\/(sdcard|storage|data)(\/|\s|$)/,
+  /(^|[;&|])\s*(reboot|recovery)(\s|$)/,
 ];
 
-function fmtDevices(list) {
-  if (!list.length) return '（没有任何设备）';
-  return list.map((d) => `${d.serial}\t${d.state}`).join('\n');
+/** 只允许这些字符进 shell：字母数字、下划线、点、斜杠、连字符、冒号、空格、= */
+const SAFE_TOKEN = /^[\w./:\-= ]+$/;
+
+function unsafeArg(name, value) {
+  const v = String(value ?? '');
+  if (!SAFE_TOKEN.test(v)) {
+    return `${name} 含不安全字符（只允许字母数字和 . / : - _ = 空格）：${JSON.stringify(v)}`;
+  }
+  return null;
 }
 
+const fmtDevices = (list) => (list?.length ? list.map((d) => `${d.serial}\t${d.state}`).join('\n') : '（没有任何设备）');
+
 export async function devices() {
-  const r = await listDevices();
-  const c = await ensure();
-  // 缓存命中时 ensure 只验 id、不取型号，这里补一次，免得面板上显示「?」
+  const r = await adbConn.listDevices();
+  const c = await adbConn.ensure();
   if (c.ok && !c.model) {
     const m = await adb(['shell', 'getprop ro.product.model'], { target: c.target, timeout: 8000 });
     if (m.ok) c.model = m.out.trim();
   }
+  const st = await adbConn.status().catch(() => null);
   const lines = [
     `adb devices:\n${fmtDevices(r.list)}`,
     '',
-    `回环目标 ${TARGET}: ${c.ok ? `已就绪（${c.model || '?'}）` : '未就绪'}`,
+    c.ok ? `回环目标 ${c.target}: 已就绪（${c.model || '?'}）` : '回环目标: 未就绪',
   ];
+  if (st?.state) {
+    lines.push(`记住的端口: ${st.state.port} · 上次成功: ${st.state.lastOkAt || '无'} · 重连次数: ${st.state.reconnects || 0}`);
+  }
   if (!c.ok) lines.push('', c.hint);
   return { text: lines.join('\n') };
 }
 
 export async function reconnect() {
-  const c = await ensure({ force: true });
+  const c = await adbConn.ensure({ force: true });
   if (!c.ok) return { text: `重连失败：${c.hint}\n\n设备列表：\n${fmtDevices(c.devices || [])}` };
   return { text: `OK ${c.target} ${c.model || ''}`.trim() };
 }
@@ -51,30 +67,33 @@ export async function shell(args) {
 
   if (DANGEROUS.some((re) => re.test(cmd)) && args?.confirm !== true) {
     return {
-      text: `已拒绝：这条命令会改用户数据或卸载应用。\ncommand: ${cmd}\n\n` +
+      text: `已拒绝：这条命令会改用户数据或卸载/停用应用。\ncommand: ${cmd}\n\n` +
         '确认要执行的话，先跟用户说清楚后果，再带 confirm:true 重试。\n' +
         '卸载前请先用 aapt 读 APK 的真实中文名——包名不可信。',
     };
   }
 
   const timeout = Math.min(Math.max(Number(args?.timeoutMs) || 30000, 1000), 120000);
-  const r = await withConn((target) => adb(['shell', cmd], { target, timeout }));
-  return { text: r.ok ? r.text : `没有可用连接：${r.text}` };
+  const r = await adbConn.withConn((target) => adb(['shell', cmd], { target, timeout }));
+  // withConn 的 ok=false 只代表「连接层面失败」；命令本身跑不通（比如 grep 没匹配）
+  // 也是 ok=false，但输出里有内容。这两种不能混成一句话。
+  if (!r.ok && !String(r.text || '').trim()) return { text: '没有可用连接：' + (r.text || '未知原因') };
+  return { text: r.text || '(无输出)' };
 }
 
 export async function install(args) {
   const path = String(args?.path || '').trim();
   if (!path) return { text: '缺少 path' };
-  const c = await ensure();
-  if (!c.ok) return { text: `没有可用连接：${c.hint}` };
+  const bad = unsafeArg('path', path);
+  if (bad) return { text: bad };
 
   const flags = ['install'];
   if (args?.reinstall !== false) flags.push('-r');
   if (args?.downgrade === true) flags.push('-d');
   flags.push(path);
 
-  const r = await adb(flags, { target: TARGET, timeout: 180000 });
-  const raw = `${r.out}${r.err}`.trim();
+  const r = await adbConn.withConn((target) => adb(flags, { target, timeout: 180000 }));
+  const raw = String(r.text || '').trim();
   if (/Success/i.test(raw)) return { text: `安装成功：${path}` };
 
   let why = '未知';
@@ -82,46 +101,49 @@ export async function install(args) {
     why = '签名不一致：旧包是另一个密钥签的。要么先卸载旧包（会丢数据，需用户同意），要么用同一密钥重签。';
   } else if (/INSTALL_FAILED_VERSION_DOWNGRADE/i.test(raw)) {
     why = '版本降级被拒。加 downgrade:true，或先卸载。';
-  } else if (/INSTALL_FAILED_INSUFFICIENT_STORAGE/i.test(raw)) {
-    why = '存储空间不足。';
-  } else if (/INSTALL_FAILED_TEST_ONLY/i.test(raw)) {
-    why = 'APK 带 testOnly 标记，用 -t 安装或重新打包。';
-  }
+  } else if (/INSTALL_FAILED_INSUFFICIENT_STORAGE/i.test(raw)) why = '存储空间不足。';
+  else if (/INSTALL_FAILED_TEST_ONLY/i.test(raw)) why = 'APK 带 testOnly 标记，用 -t 安装或重新打包。';
   return { text: `安装失败：${why}\n\n原始输出：\n${raw}` };
 }
 
 export async function logcat(args) {
-  const c = await ensure();
-  if (!c.ok) return { text: `没有可用连接：${c.hint}` };
-
-  if (args?.clear === true) await adb(['logcat', '-c'], { target: TARGET, timeout: 15000 });
-
   const n = Math.min(Math.max(Number(args?.lines) || 200, 10), 5000);
   const filter = String(args?.filter || '').trim();
-  const cmds = [`logcat -d -t ${n}`];
-  if (filter) cmds.push(`grep -E ${JSON.stringify(filter)}`);
-  const cmd = cmds.join(' | ');
+  if (filter) {
+    const bad = unsafeArg('filter', filter);
+    if (bad) return { text: bad };
+  }
 
-  const r = await adb(['shell', cmd], { target: TARGET, timeout: 60000 });
-  const body = `${r.out}${r.err ? `\n[stderr] ${r.err}` : ''}`.trim();
-  return { text: body || `(logcat 无输出${filter ? `，filter=${filter}` : ''})` };
+  if (args?.clear === true) {
+    const cl = await adbConn.withConn((target) => adb(['logcat', '-c'], { target, timeout: 15000 }));
+    if (!cl.ok) return { text: `清空日志失败：${cl.text}` };
+  }
+
+  const cmd = filter ? `logcat -d -t ${n} | grep -E '${filter.replace(/'/g, '')}'` : `logcat -d -t ${n}`;
+  const r = await adbConn.withConn((target) => adb(['shell', cmd], { target, timeout: 60000 }));
+  return { text: r.text || `(logcat 无输出${filter ? `，filter=${filter}` : ''})` };
 }
 
 export async function screencap(args) {
-  const remote = String(args?.outPath || '/sdcard/dsh-screencap.png');
-  const c = await ensure();
-  if (!c.ok) return { text: `没有可用连接：${c.hint}` };
-
-  const r = await adb(['shell', `screencap -p ${JSON.stringify(remote)}`], { target: TARGET, timeout: 40000 });
-  if (!r.ok && (r.err || '').trim()) return { text: `截图失败：${(r.err || r.out).trim()}` };
-
-  const ls = await adb(['shell', `ls -l ${JSON.stringify(remote)}`], { target: TARGET, timeout: 20000 });
-  const lines = [`截图已保存：${remote}`, (ls.out || '').trim()].filter(Boolean);
+  const remote = String(args?.outPath || '/sdcard/dsh-screencap.png').trim();
+  const bad = unsafeArg('outPath', remote);
+  if (bad) return { text: bad };
 
   const local = String(args?.localPath || '').trim();
   if (local) {
-    const p = await adb(['pull', remote, local], { target: TARGET, timeout: 60000 });
-    lines.push(p.ok ? `已拉到本地：${local}` : `拉取失败：${(p.err || p.out).trim()}`);
+    const badLocal = unsafeArg('localPath', local);
+    if (badLocal) return { text: badLocal };
+  }
+
+  const shot = await adbConn.withConn((target) => adb(['shell', `screencap -p ${remote}`], { target, timeout: 40000 }));
+  if (!shot.ok) return { text: `截图失败：${shot.text}` };
+
+  const ls = await adbConn.withConn((target) => adb(['shell', `ls -l ${remote}`], { target, timeout: 20000 }));
+  const lines = [`截图已保存：${remote}`, (ls.text || '').trim()].filter(Boolean);
+
+  if (local) {
+    const p = await adbConn.withConn((target) => adb(['pull', remote, local], { target, timeout: 60000 }));
+    lines.push(p.ok ? `已拉到本地：${local}` : `拉取失败：${p.text}`);
   }
   return { text: lines.join('\n') };
 }
