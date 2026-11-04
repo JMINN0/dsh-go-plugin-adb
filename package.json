@@ -1,0 +1,15 @@
+{
+  "name": "dsh-plugin-adb",
+  "version": "0.1.0",
+  "description": "Direct adb from inside the phone: the agent talks to this device's own adbd over loopback (127.0.0.1:5555), so it keeps working with Wi-Fi off. uid 2000 shell — pm install, am start, logcat, dumpsys, screencap.",
+  "keywords": ["dsh", "dsh-plugin", "deepseek-harness", "adb", "android", "shizuku", "automation", "on-device"],
+  "license": "MIT",
+  "author": "JMINNO",
+  "type": "module",
+  "main": "./src/index.js",
+  "exports": { ".": "./src/index.js" },
+  "files": ["src", "bin", "cordis.patch.yml", "dsh.plugin.json", "README.md", "LICENSE"],
+  "bin": { "adbgo": "./bin/adbgo" },
+  "engines": { "node": "^22.19.0 || >=24.0.0" },
+  "dsh": { "bundle": { "patch": "./cordis.patch.yml" } }
+}

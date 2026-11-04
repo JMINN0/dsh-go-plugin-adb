@@ -1,0 +1,46 @@
+#!/bin/bash
+# adbgo — 让住在这台手机里的 agent 连上本机 adbd（回环，不依赖 WiFi）
+# 与插件共用一份状态：$DSH_HOME/plugin-adb/state.json
+# 用法：adbgo [status|connect|repair|<adb 参数...>]
+set -u
+STATE_DIR="${DSH_HOME:-$HOME/.dsh}/plugin-adb"
+STATE="$STATE_DIR/state.json"
+say(){ printf '%s\n' "$*"; }
+
+port_of(){ [ -f "$STATE" ] && grep -o '"port"[[:space:]]*:[[:space:]]*[0-9]*' "$STATE" | grep -o '[0-9]*$' | head -1; }
+save(){ mkdir -p "$STATE_DIR"; printf '{\n  "port": %s,\n  "lastOkAt": %s\n}\n' "$1" "$(date +%s000)" > "$STATE"; }
+
+# 过滤 emulator-* 假条目：adb 把 5554–5585 当模拟器段，connect 探测会凭空造出 emulator-55xx
+online(){ adb devices 2>/dev/null | awk 'NR>1 && $2=="device"{print $1}' | grep -v '^emulator-'; }
+usable(){ adb -s "$1" shell id 2>/dev/null | grep -q 'uid=2000'; }
+
+try_ports(){
+  local p saved; saved=$(port_of); 
+  for p in "$saved" 5555 6555 7555 8555; do
+    [ -z "$p" ] && continue
+    adb connect "127.0.0.1:$p" >/dev/null 2>&1; sleep 0.4
+    if usable "127.0.0.1:$p"; then save "$p"; say "OK  127.0.0.1:$p  $(adb -s "127.0.0.1:$p" shell getprop ro.product.model 2>/dev/null | tr -d '\r')"; return 0; fi
+  done
+  return 1
+}
+
+need_adb(){ command -v adb >/dev/null 2>&1 || { say "缺少 adb：apt-get install -y android-tools-adb"; return 1; }; }
+
+case "${1:-connect}" in
+  status) online; echo "--- 记住的端口: $(port_of)" ;;
+  connect|up)
+    need_adb || exit 3
+    adb start-server >/dev/null 2>&1
+    online | grep -qx "127.0.0.1:$(port_of)" && usable "127.0.0.1:$(port_of)" && { say "已连接 127.0.0.1:$(port_of)"; exit 0; }
+    # 已连着无线调试的随机端口？先拿它把端口固定到首选
+    for d in $(online); do
+      [ "$d" = "127.0.0.1:$(port_of)" ] && continue
+      adb -s "$d" tcpip 5555 >/dev/null 2>&1 && sleep 1.5
+      break
+    done
+    try_ports && exit 0
+    say "连不上。一次性三步：开无线调试 → 把配对码+端口发我 → adb pair 后 adb tcpip 5555"
+    exit 1 ;;
+  repair) adb kill-server >/dev/null 2>&1; sleep 0.5; exec "$0" connect ;;
+  *) P=$(port_of); [ -z "$P" ] && P=5555; exec adb -s "127.0.0.1:$P" "$@" ;;
+esac

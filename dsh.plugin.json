@@ -1,0 +1,6 @@
+{
+  "name": "dsh-plugin-adb",
+  "description": "adbd over loopback: on-device uid 2000 shell for the agent.",
+  "version": "0.1.0",
+  "entry": { "name": "dsh-plugin-adb", "inject": ["tools"] }
+}

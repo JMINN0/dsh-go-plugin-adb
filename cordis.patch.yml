@@ -1,0 +1,3 @@
+- insert:
+    - id: dsh-plugin-adb
+      name: dsh-plugin-adb
