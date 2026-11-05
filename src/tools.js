@@ -35,88 +35,101 @@ import * as adbConn from './adb.js';
  */
 
 /** 按 shell 分隔符切段——**引号内的分隔符不算**（否则 echo "ls; reboot" 会被切断后误判）。 */
+/** 按 shell 分隔符切段：引号内的不算；heredoc 内容整段跳过（那是数据不是命令）。 */
 function splitSegments(cmd) {
+  const lines = String(cmd).split('\n');
   const out = [];
-  let cur = '';
-  let quote = null;
-  const text = String(cmd);
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    if (quote) {
-      cur += ch;
-      if (ch === quote) quote = null;
+  let heredoc = null;
+  for (const line of lines) {
+    if (heredoc) {
+      if (line.trim() === heredoc) heredoc = null;
       continue;
     }
-    if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
-    if (ch === ';' || ch === '|' || ch === '&' || ch === '(' || ch === ')' || ch === '\n') {
-      if (ch === '|' || ch === '&') {
-        // `||` / `&&` 一起吃掉
-        if (text[i + 1] === ch) i += 1;
+    const m = line.match(/<<-?\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?/);
+    let cur = '';
+    let q = null;
+    for (let i = 0; i < line.length; i += 1) {
+      const ch = line[i];
+      if (q) { cur += ch; if (ch === q) q = null; continue; }
+      if (ch === '"' || ch === "'") { q = ch; cur += ch; continue; }
+      if (ch === ';' || ch === '|' || ch === '&' || ch === '(' || ch === ')') {
+        if ((ch === '|' || ch === '&') && line[i + 1] === ch) i += 1;
+        out.push(cur); cur = '';
+        continue;
       }
-      out.push(cur); cur = '';
-      continue;
+      cur += ch;
     }
-    cur += ch;
+    out.push(cur);
+    if (m) heredoc = m[1];
   }
-  out.push(cur);
   return out;
 }
 
-/** 分词：按空白切，引号内的空白不切，引号本身去掉（得到"这个词实际是什么"）。 */
+/** 分词：按空白切，引号内空白不切；引号和反斜杠按 shell 规则处理。 */
 function tokenize(seg) {
   const out = [];
   let cur = '';
   let quote = null;
-  for (const ch of String(seg)) {
+  let has = false;
+  const text = String(seg);
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
     if (quote) {
       if (ch === quote) quote = null; else cur += ch;
-    } else if (ch === '"' || ch === "'") {
-      quote = ch;
-    } else if (/\s/.test(ch)) {
-      if (cur) { out.push(cur); cur = ''; }
-    } else {
-      cur += ch;
+      has = true;
+      continue;
     }
+    if (ch === '"' || ch === "'") { quote = ch; has = true; continue; }
+    if (ch === '\\' && i + 1 < text.length) { cur += text[i + 1]; i += 1; has = true; continue; }
+    if (/\s/.test(ch)) { if (has) { out.push(cur); cur = ''; has = false; } continue; }
+    cur += ch; has = true;
   }
-  if (cur) out.push(cur);
+  if (has) out.push(cur);
   return out;
 }
 
 /** 包装命令：剥掉它们之后才是真正要执行的东西。 */
 const WRAPPERS = new Set(['sudo', 'doas', 'busybox', 'toybox', 'env', 'exec', 'nohup', 'timeout',
-  'nice', 'ionice', 'sh', 'bash', 'zsh', 'dash', 'ash', 'su']);
-/** 会吃一个参数的选项（`sudo -u shell pm ...` 里的 -u shell）。 */
-const OPTS_WITH_VALUE = new Set(['-u', '-g', '-p', '-U', '-G', '-P', '-C', '-r', '-t', '-o', '-e', '-i', '-l', '-n', '-d', '-s']);
+  'nice', 'ionice', 'sh', 'bash', 'zsh', 'dash', 'ash', 'su', 'xargs', 'command', 'builtin']);
+
+/** 会吃一个参数的选项。**不含** -i/-n/-l/-s（它们是 flag，当吃值选项会把命令吃掉）。 */
+const OPTS_WITH_VALUE = new Set(['-u', '-g', '-p', '-U', '-G', '-P', '-C', '-r', '-t', '-d', '-o', '-e', '-a']);
 const PM_ACTIONS = new Set(['uninstall', 'clear', 'disable', 'disable-user', 'uninstall-system-updates']);
-const PROTO_DIRS = /^\/(sdcard|storage|data)(\/|$)/i;
+
+/** 受保护路径：rm -rf 打到这些地方就拦（早期只拦 `*`，`rm -rf /` 直接放过）。 */
+const PROTECTED = [
+  /^\/$/, /^\/\*$/, /^~\/*$/, /^\.\/\*$/, /^\*$/,
+  /^\/(sdcard|storage|data|system|root|vendor|etc|boot|dev|proc|sys|bin|sbin|lib|opt)(\/|$)/i,
+];
+const isProtectedPath = (p) => PROTECTED.some((re) => re.test(String(p)));
 
 function basename(tok) {
   return String(tok || '').replace(/^.*\//, '').toLowerCase();
 }
 
-/** 判断单个命令段是否危险。递归处理 `sh -c "..."` 这种。 */
+/** 判断单个命令段是否危险。`sh -c "..."` 递归判断。 */
 function segmentDangerous(seg, depth = 0) {
-  if (depth > 4) return false;                       // 防止 `sh -c "sh -c ..."` 无限递归
+  if (depth > 4) return false;
   let toks = tokenize(seg);
   if (!toks.length) return false;
 
-  // 1) 剥前置变量赋值 FOO=bar
   while (toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0])) toks.shift();
 
-  // 2) 剥包装命令与其选项
-  for (let guard = 0; guard < 8 && toks.length; guard += 1) {
+  for (let guard = 0; guard < 10 && toks.length; guard += 1) {
     const head = basename(toks[0]);
     if (!WRAPPERS.has(head)) break;
+    const wrapper = head;
     toks.shift();
+
+    // timeout 的第一个非选项参数是时长，不是命令
+    if (wrapper === 'timeout' && toks.length && /^\d+(\.\d+)?[smhd]?$/i.test(toks[0])) toks.shift();
+
     while (toks.length && /^-/.test(toks[0])) {
       const opt = toks.shift();
-      // -c 后面那串是命令本身 → 递归
-      if (opt === '-c' && toks.length) {
-        return segmentDangerous(toks[0], depth + 1);
-      }
+      // 组合短选项里含 c（sh -lc / bash -ec）→ 后面那串是命令，重新切段判断
+      if (/^-[A-Za-z]*c[A-Za-z]*$/.test(opt) && toks.length) return isDangerous(toks[0]);
       if (OPTS_WITH_VALUE.has(opt) && toks.length) toks.shift();
     }
-    // 剥完选项后可能还是包装命令（sudo busybox rm ...），继续循环
     while (toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0])) toks.shift();
   }
 
@@ -124,39 +137,33 @@ function segmentDangerous(seg, depth = 0) {
   const verb = basename(toks[0]);
   const args = toks.slice(1).map((t) => t.toLowerCase());
 
-  // pm uninstall / clear / disable
   if (verb === 'pm' && args.length && PM_ACTIONS.has(args[0])) return true;
-  // cmd package uninstall / clear / disable
   if (verb === 'cmd' && args[0] === 'package' && args[1] && PM_ACTIONS.has(args[1])) return true;
-  // reboot / recovery（作为段首动词，带不带参数都算）
   if (verb === 'reboot' || verb === 'recovery') return true;
-  // svc power reboot
   if (verb === 'svc' && args.join(' ').includes('power reboot')) return true;
-  // rm 动受保护目录，或 rm -rf *
+
   if (verb === 'rm') {
-    const hasRecursive = args.some((a) => /^-[a-z]*[rf]/i.test(a));
-    if (args.some((a) => PROTO_DIRS.test(a))) return true;
-    if (hasRecursive && args.some((a) => a === '*' || a === '/*')) return true;
+    // 只认**递归**（含 r/R）才危险；`rm -f /sdcard/x.txt` 删单个文件是正常操作
+    const recursive = args.some((a) => /^-[a-z]*r/i.test(a));
+    if (recursive && args.some((a) => !/^-/.test(a) && isProtectedPath(a))) return true;
+    if (recursive && args.some((a) => a === '*' || a === '/*' || a === './*')) return true;
   }
-  // find 受保护目录 -delete / -exec rm
   if (verb === 'find') {
     const joined = args.join(' ');
-    if (PROTO_DIRS.test(args[0] || '') && (joined.includes('-delete') || /-exec\s+rm/.test(joined))) return true;
+    if (args[0] && isProtectedPath(args[0]) && (joined.includes('-delete') || /-exec\s+rm/.test(joined))) return true;
   }
-  // dd 写裸设备
   if (verb === 'dd' && args.some((a) => /^of=\/dev\/(block|by-name)/.test(a))) return true;
   return false;
 }
 
 /**
- * 判断一条命令是否命中危险拦截名单。
- * 导出给测试直接 import（测试不该再从源码里 eval 抠正则——那种做法一改正则就崩）。
+ * 判断一条命令是否命中危险拦截名单。导出给测试直接 import。
+ * 定位是**防手滑，不是安全边界**：`$(...)` 动态拼接、alias、自写脚本都拦不住。
  */
 export function isDangerous(cmd) {
-  // 不做引号预处理：分词函数本身按 shell 规则处理引号
-  // （`pm un"install"` 会正确拼成 uninstall，`echo "rm -rf /sdcard"` 会保持成一个参数）。
   return splitSegments(cmd).some((seg) => segmentDangerous(seg));
 }
+
 
 /** 只允许这些字符进 shell：字母数字、下划线、点、斜杠、连字符、冒号、空格、= */
 const SAFE_TOKEN = /^[\w./:\-= ]+$/;

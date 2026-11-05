@@ -10,7 +10,7 @@
 | 验证环境 | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | 工具数 | 6 |
 | 需要 root | **不需要** |
-| 稳定性 | 10/10 稳定性套件 + 40/40 危险命令拦截 |
+| 稳定性 | 10/10 稳定性套件 + 77/77 危险命令拦截 |
 
 ---
 
@@ -160,7 +160,7 @@ Agent 会调用 `adb_devices`，期望返回：
 127.0.0.1:5555  device
 ```
 
-**看到这行才算真的装好了。** 如果 Agent 说"没有这个工具"，回到 4.3 确认重启过引擎；如果返回 `没有可用连接`，回到第五节重新配对。
+**看到这行才算真的装好了。** 如果 Agent 说"没有这个工具"，回到 4.3 确认重启过引擎；如果返回 `连不上，已试过端口`，回到第五节重新配对。
 
 > **工具怎么触发？** 这些工具是给 Agent 用的，不是给人敲的。你正常说话，Agent 自己决定调用哪个。你也可以直接点名："用 adb_shell 执行 getprop ro.product.model"。
 >
@@ -264,7 +264,7 @@ adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 - `rm -rf /sdcard` 及其变体
 - `reboot` / `recovery`
 
-**`confirm` 的语义**：只有传 `true` 才放行；传 `false` 和不传**完全等价**（都会被拒）。拦截测试 40/40 通过，包括用引号绕过的变体：
+**`confirm` 的语义**：只有传 `true` 才放行；传 `false` 和不传**完全等价**（都会被拒）。拦截测试 77/77 通过，包括用引号绕过的变体：
 
 ```
 pm "uninstall" com.foo.bar     ← 同样被拦
@@ -285,7 +285,7 @@ pm uninstall 'com.foo.bar'     ← 同样被拦
 
 ```
 adb_install { path: "/sdcard/Download/app.apk" }
-→ { text: "Success" }  或失败原因（如 INSTALL_FAILED_UPDATE_INCOMPATIBLE）
+→ { text: "安装成功：<路径>" }  或失败原因（如 INSTALL_FAILED_UPDATE_INCOMPATIBLE）
 ```
 
 **path 用哪种路径**：用**设备上的路径**（`/sdcard/...`），不是 proot 里的路径。proot 的 `/root/xxx` 设备看不到，要先 push 过去。
@@ -483,7 +483,7 @@ adb devices:
 
 **这是"防手滑"，不是安全边界。**
 
-能拦住（实测 9/9）：直接写法、引号拼接（`p""m uninstall`、`pm un"install"`、`cmd "package" uninstall`）、`find /sdcard -delete`、`su -c reboot`、`svc power reboot`、`rm -rf *`。
+能拦住（实测 77/77）：直接写法、引号拼接（`p""m uninstall`、`pm un"install"`、`cmd "package" uninstall`）、`find /sdcard -delete`、`su -c reboot`、`svc power reboot`、`rm -rf *`。
 
 **拦不住**：`$(echo cm0)` 这种动态拼接、alias、自己写脚本、`adb shell` 之外的路子。
 

@@ -10,7 +10,7 @@ English ｜ [中文](README.md)
 | Verified on | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | Tools | 6 |
 | Root required | **No** |
-| Stability | 10/10 stability suite + 40/40 dangerous-command guard |
+| Stability | 10/10 stability suite + 77/77 dangerous-command guard |
 
 ---
 
@@ -142,7 +142,7 @@ The agent calls `adb_devices` and should return:
 127.0.0.1:5555  device
 ```
 
-**Seeing that line is what "installed" means.** If the agent says the tool does not exist, go back to 4.3 and confirm the restart. If it returns `没有可用连接`, redo section 5.
+**Seeing that line is what "installed" means.** If the agent says the tool does not exist, go back to 4.3 and confirm the restart. If it returns `连不上，已试过端口`, redo section 5.
 
 > **How are the tools triggered?** They are for the agent, not for you to type. You speak normally and the agent picks a tool, or you name it: "use adb_shell to run getprop ro.product.model".
 >
@@ -237,7 +237,7 @@ adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 - `rm -rf /sdcard` and variants
 - `reboot` / `recovery`
 
-**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The guard passes 40/40 tests, including quote-based bypasses such as `pm "uninstall" com.foo.bar`.
+**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The guard passes 77/77 tests, including quote-based bypasses such as `pm "uninstall" com.foo.bar`.
 
 **After a refusal**: explain the consequence to the user, get consent, then resend with `confirm: true`. Before uninstalling anything, read the APK's real display name with aapt — package names lie.
 
@@ -423,7 +423,7 @@ Returns the rebuild steps and result, including a uid 2000 verification line on 
 
 **It prevents slips, it is not a security boundary.**
 
-Blocked (9/9 measured): direct forms, quote concatenation (`p""m uninstall`, `pm un"install"`, `cmd "package" uninstall`), `find /sdcard -delete`, `su -c reboot`, `svc power reboot`, `rm -rf *`.
+Blocked (77/77 measured): direct forms, quote concatenation (`p""m uninstall`, `pm un"install"`, `cmd "package" uninstall`), `find /sdcard -delete`, `su -c reboot`, `svc power reboot`, `rm -rf *`.
 
 **Not blocked**: dynamic construction like `$(echo cm0)`, aliases, your own scripts, anything outside `adb shell`.
 
