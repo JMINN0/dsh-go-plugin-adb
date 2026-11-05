@@ -1,7 +1,7 @@
 {
   "name": "dsh-go-plugin-adb",
   "description": "adbd over loopback: on-device uid 2000 shell for the agent.",
-  "version": "0.1.0",
+  "version": "2026.1105.1908",
   "entry": {
     "name": "dsh-go-plugin-adb",
     "inject": [

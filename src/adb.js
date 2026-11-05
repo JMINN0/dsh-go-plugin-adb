@@ -38,8 +38,16 @@ export async function adb(args, { timeout = 25000, target = null, maxBuffer = 32
     return { ok: true, out: stdout ?? '', err: stderr ?? '' };
   } catch (e) {
     const out = typeof e.stdout === 'string' ? e.stdout : '';
-    const err = typeof e.stderr === 'string' && e.stderr ? e.stderr : String(e.message || e);
-    return { ok: false, out, err, code: e.code };
+    let err = typeof e.stderr === 'string' && e.stderr ? e.stderr : '';
+    // execFile 失败时 message 形如 "Command failed: adb -s 127.0.0.1:5555 shell sleep 6"，
+    // 那是**内部调用细节**，不该原样吐给用户/模型（以前确实吐了，契约文档还照着写）。
+    // 这里剥掉这层噪声，只留真正的 stderr。
+    if (!err) {
+      const msg = String(e.message || '');
+      err = msg.startsWith('Command failed:') ? '' : msg;
+    }
+    const timedOut = e.killed === true || e.signal === 'SIGTERM' || /timed?\s*out/i.test(String(e.message || ''));
+    return { ok: false, out, err, code: e.code, timedOut };
   }
 }
 
@@ -110,7 +118,12 @@ export async function ensure({ force = false } = {}) {
     return { ok: true, target: `127.0.0.1:${st.port}`, port: st.port, via: 'cached' };
   }
 
-  if (force) await adb(['kill-server']);
+  // 以前 force 一上来就 kill-server，会把别人（包括并发的自己）正在用的 server 踢掉。
+  // 现在先试 start-server（幂等、不会打断已有连接），真的不行才轮到 kill-server。
+  if (force) {
+    const started = await adb(['start-server']);
+    if (!started.ok) await adb(['kill-server']);
+  }
   await adb(['start-server']);
 
   const { list } = await listDevices();
@@ -165,31 +178,66 @@ export async function ensure({ force = false } = {}) {
 }
 
 /**
- * 自动恢复：任何一次调用失败（device offline / not found），强制重连一次再重试。
- * 这是"断开后自己恢复"的唯一实现点——插件没有常驻进程，恢复只能发生在调用时。
+ * 进程内 single-flight：同一时刻只允许一次 ensure 探测在飞。
+ *
+ * 为什么需要：以前 10 个并发调用会各自跑完整的探测+迁移，adb server 恰好被杀时实测
+ * 只有 5/10 成功，而且它们会互相 kill-server 把对方刚拉起来的服务踢掉（外部只杀 6 次，
+ * 日志里出现 16 次 kill-server）。这不是"重试"，是惊群。
  */
-export async function withConn(fn, { retries = 1 } = {}) {
+let inflightEnsure = null;
+
+export async function ensureShared(opts) {
+  if (inflightEnsure) return inflightEnsure;
+  inflightEnsure = (async () => {
+    try { return await ensure(opts); } finally { inflightEnsure = null; }
+  })();
+  return inflightEnsure;
+}
+
+/**
+ * 自动恢复：调用失败时**只对幂等探测命令**重连重试一次。
+ *
+ * 关键修正：以前拿输出文本判断"是不是连接层故障"（匹配 connection reset / error: closed 等），
+ * 结果业务命令的输出里只要含这些词就会被重跑一遍——实测 `curl` 报 "Connection reset by peer"、
+ * `logcat | grep "device offline"` 都会触发。带副作用的命令（settings put / am start / 追加写）
+ * 跑两遍是真损害。
+ *
+ * 现在改成：调用方显式声明 idempotent 才重试。业务命令一律不重跑。
+ */
+export async function withConn(fn, { retries = 1, idempotent = false } = {}) {
   let last = null;
   for (let i = 0; i <= retries; i += 1) {
-    const c = await ensure({ force: i > 0 });
+    // 只有重试那一次才 force；首次永远用共享探测，避免惊群
+    const c = i === 0 ? await ensureShared({}) : await ensureShared({ force: true });
     if (!c.ok) { last = { ok: false, text: c.hint }; continue; }
     const r = await fn(c.target);
     const text = `${r.out || ''}${r.err ? `\n[stderr] ${r.err}` : ''}`.trim();
     if (r.ok) return { ok: true, text: text || '(无输出)', conn: c };
-    last = { ok: false, text: text || '命令失败', conn: c };
-    // 只认**连接层**的瞬时故障。'not found' 不能算：`nosuchcmd` 的报错就是
-    // "sh: nosuchcmd: not found"，把它当连接错误重试，等于同一条命令在真机上跑两遍（实测踩过）。
-    const transient = /device offline|no devices|device .*not found|protocol fault|connection reset|error: closed/i
-      .test(`${r.out}${r.err}`);
-    if (!transient) return last;
-    await state.save({ reconnects: (await state.load()).reconnects + 1 });
+    // 失败时别把信息压成"命令失败"——调用方需要知道是超时、退出码非 0、还是真的没输出。
+    const reason = r.timedOut
+      ? '超时'
+      : (r.code !== undefined && r.code !== 0 ? `退出码 ${r.code}` : '');
+    last = { ok: false, text: text || `命令失败（${reason || '无输出'}）`, conn: c, code: r.code, timedOut: r.timedOut };
+    // 不是幂等命令 → 绝不重跑。宁可把错误如实返回，也不冒跑两遍的险。
+    if (!idempotent) return last;
   }
   return last;
 }
 
 export async function shell(command, { timeout = 30000 } = {}) {
+  // 业务命令**不重试**（idempotent 默认 false）。跑两遍的代价比一次失败大得多。
   const r = await withConn((target) => adb(['shell', command], { target, timeout }));
   return { ok: r.ok, text: r.text };
+}
+
+/** 带超时/退出码解释的 shell：给工具层用，返回人能读懂的话。 */
+export async function shellDetailed(command, { timeout = 30000 } = {}) {
+  const r = await withConn((target) => adb(['shell', command], { target, timeout }));
+  if (r.ok) return r;
+  if (r.timedOut) {
+    return { ...r, text: `命令超时（${timeout}ms 内没结束）。要更长时间就调大 timeoutMs。\n命令：${command}` };
+  }
+  return { ...r, text: `${r.text}\n命令：${command}` };
 }
 
 export async function status() {

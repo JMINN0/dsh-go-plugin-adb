@@ -5,9 +5,18 @@
  * 跑法：node test/stability.mjs
  */
 
-import { adb, ensure, listDevices, shell, withConn } from '../src/adb.js';
-import * as state from '../src/state.js';
 import { writeFile, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+// 【必须先设环境变量，再导入被测模块】——state.js 在模块加载时读 DSH_ADB_STATE_DIR。
+// 不隔离的话，跑一次测试就会改掉你自己真实的 ~/.dsh/plugin-adb/state.json
+// （审查实测：T1 的 30 次 ensure = 30 次写盘，把端口记忆和重连计数都搅了）。
+const TEST_STATE_DIR = join(tmpdir(), `dsh-adb-test-${process.pid}-${Date.now()}`);
+process.env.DSH_ADB_STATE_DIR = TEST_STATE_DIR;
+
+const { adb, ensure, listDevices, shell, withConn } = await import('../src/adb.js');
+const state = await import('../src/state.js');
 
 const results = [];
 const t0 = Date.now();
@@ -121,3 +130,6 @@ const dur = Date.now() - t0;
 const pass = results.filter((r) => r.ok).length;
 console.log(`\n合计 ${pass}/${results.length} 通过，用时 ${(dur / 1000).toFixed(1)}s`);
 process.exit(pass === results.length ? 0 : 1);
+
+// 收尾：删掉临时状态目录，别在 /tmp 留垃圾
+try { await rm(TEST_STATE_DIR, { recursive: true, force: true }); } catch { /* ignore */ }

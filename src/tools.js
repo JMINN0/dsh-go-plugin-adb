@@ -25,6 +25,18 @@ const DANGEROUS = [
 /** 只允许这些字符进 shell：字母数字、下划线、点、斜杠、连字符、冒号、空格、= */
 const SAFE_TOKEN = /^[\w./:\-= ]+$/;
 
+/**
+ * logcat 的 filter 是正则（走 grep -E），需要允许 `|` `(` `)` `[` `]` `*` `+` `?` `^` `$`。
+ * 但直接放进 shell 有注入风险，所以：① 白名单限定字符集 ② 整体用单引号包裹 ③ 转义内部单引号。
+ * 以前 SAFE_TOKEN 不允许 `|`，而文档示例写着 `AndroidRuntime|FATAL` —— 用户第一条命令就被拒。
+ */
+const FILTER_CHARS = /^[\w./:=|()\[\]^$*+?\\ -]+$/;
+
+function quoteSingle(str) {
+  // POSIX shell：把内部单引号变成 '\'' ，整体再包一层单引号
+  return `'${String(str).replace(/'/g, `'\\''`)}'`;
+}
+
 function unsafeArg(name, value) {
   const v = String(value ?? '');
   if (!SAFE_TOKEN.test(v)) {
@@ -74,7 +86,7 @@ export async function shell(args) {
   }
 
   const timeout = Math.min(Math.max(Number(args?.timeoutMs) || 30000, 1000), 120000);
-  const r = await adbConn.withConn((target) => adb(['shell', cmd], { target, timeout }));
+  const r = await adbConn.shellDetailed(cmd, { timeout });
   // withConn 的 ok=false 只代表「连接层面失败」；命令本身跑不通（比如 grep 没匹配）
   // 也是 ok=false，但输出里有内容。这两种不能混成一句话。
   if (!r.ok && !String(r.text || '').trim()) return { text: '没有可用连接：' + (r.text || '未知原因') };
@@ -107,21 +119,23 @@ export async function install(args) {
 }
 
 export async function logcat(args) {
-  const n = Math.min(Math.max(Number(args?.lines) || 200, 10), 5000);
-  const filter = String(args?.filter || '').trim();
-  if (filter) {
-    const bad = unsafeArg('filter', filter);
-    if (bad) return { text: bad };
+  const lines = Math.min(Math.max(Number(args?.lines) || 200, 1), 5000);
+  const filter = args?.filter ? String(args.filter) : '';
+
+  if (filter && !FILTER_CHARS.test(filter)) {
+    return { text: `filter 含不支持的字符：${JSON.stringify(filter)}\n只允许字母数字、. / : = | ( ) [ ] ^ $ * + ? 空格和连字符（走 grep -E 正则）` };
   }
 
-  if (args?.clear === true) {
-    const cl = await adbConn.withConn((target) => adb(['logcat', '-c'], { target, timeout: 15000 }));
-    if (!cl.ok) return { text: `清空日志失败：${cl.text}` };
+  // 单引号包裹，防注入；grep -E 支持 | 等正则语法
+  const grepPart = filter ? ` | grep -E ${quoteSingle(filter)}` : '';
+  const cmd = `logcat -d -t ${lines}${grepPart}`;
+  const r = await adbConn.withConn((target) => adb(['shell', cmd], { target, timeout: 30000 }), { idempotent: true });
+  // grep 无匹配时退出码是 1 —— 这是**正常结果**，不是错误。
+  // 以前把它显示成"命令失败"，用户以为插件坏了（实测踩过）。
+  if (r.code === 1 || /退出码 1$/.test(String(r.text || ''))) {
+    return { text: `（最近 ${lines} 行里没有匹配 ${JSON.stringify(filter || '*')} 的内容）` };
   }
-
-  const cmd = filter ? `logcat -d -t ${n} | grep -E '${filter.replace(/'/g, '')}'` : `logcat -d -t ${n}`;
-  const r = await adbConn.withConn((target) => adb(['shell', cmd], { target, timeout: 60000 }));
-  return { text: r.text || `(logcat 无输出${filter ? `，filter=${filter}` : ''})` };
+  return { text: String(r.text || '').trim() || '(无输出)' };
 }
 
 export async function screencap(args) {

@@ -1,20 +1,38 @@
-# v0.1.0
+# 发布记录
+
+## v2026.1105.1908
 
 首个可发布版本。
 
-## 能做什么
-手机内的 agent 用 adb 连本机 adbd 的回环端口，关 WiFi 不断。六个工具：devices / reconnect / shell / install / logcat / screencap。
+### 包含
 
-## 已验证
-- 稳定性 10/10（连续 ensure ×30、连续 shell ×30、kill-server 自愈 ×5、disconnect 自愈 ×3、状态损坏、错端口回落、并发 ×3、超时、缺 adb、状态不可写）
-- 危险命令拦截 28/28（含 `pm "uninstall"`、`cmd package uninstall`、`rm -rf /sdcard`、`echo x&&reboot`）
-- 路径注入拒绝（`$(echo INJ)` 类写法）
-- 工具注册 6/6
+- 6 个工具：`adb_devices` / `adb_shell` / `adb_install` / `adb_logcat` / `adb_screencap` / `adb_reconnect`
+- 手机内回环连接（`127.0.0.1:5555`），关 WiFi 也能用
+- 危险命令拦截（`pm uninstall` / `rm -rf /sdcard` / `reboot` 等需显式 `confirm: true`）
+- 端口自动协商（5555 → 6555 → 7555 → 8555 → 9555）
+- 断线自愈（`kill-server` / `disconnect` 后自动重连）
 
-## 未验证
-只测过 Android 16 / adb 34.0.4 / Node 24.22.1 一种组合。Android 11–13 和旧版 adb 没测。
+### 本版修的关键问题（发送前终审发现）
 
-## 安装
-```bash
-dsh plugin --profile web add git+https://github.com/<you>/dsh-plugin-adb
-```
+| 问题 | 影响 | 修法 |
+|---|---|---|
+| 业务命令可能被执行两遍 | `curl` 等命令的 stderr 含 `connection reset` 时被当成连接故障重试 | 只有调用方显式标记幂等的命令才重试；业务命令一律不重跑 |
+| 并发惊群 | server 被杀时 10 路并发只有 5 路成功，且互相 `kill-server` | 加进程内 single-flight；重试先 `start-server` 不再无脑 kill |
+| 状态文件丢更新 | 20 路并发 `reconnects++` 只有 1 次生效 | 写操作串行排队 + `tmp+rename` 原子替换 + `bump()` 原子自增 |
+| `logcat filter` 文档与实现矛盾 | 文档示例 `"A|B"` 被安全校验拒绝，用户第一条命令就失败 | 允许正则字符并用单引号包裹防注入；`grep` 退出码 1 视为"无匹配"而非错误 |
+| 返回值文案 | 超时/失败返回内部 `Command failed: adb ...` 噪声 | 剥掉内部调用细节，超时和退出码给出可读说明 |
+| 测试污染真实状态 | 跑测试会改掉用户的 `~/.dsh/plugin-adb/state.json` | 测试启动前设 `DSH_ADB_STATE_DIR` 到临时目录，结束清理 |
+
+### 验证
+
+- 稳定性套件 10/10
+- 危险命令拦截 28/28
+- 工具契约 6/6 通过宿主 `defineTool` 编译
+- 真实引擎 trial PASS
+- 从 GitHub 克隆后可正常注册 6 个工具
+
+### 已知边界
+
+- 只在 Android 16 + adb 34.0.4 + nubia NX809J 上验证
+- 危险命令拦截是"防手滑"，不是安全边界（`p""m` 这类拼接可绕过；详见 README）
+- 无 root，读不了 `/data/data`
