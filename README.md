@@ -237,7 +237,7 @@ adb_devices
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
 | `command` | string | ✅ | 要执行的命令，可含管道、重定向、`&&`、`$()` |
-| `timeoutMs` | integer | | 超时毫秒，1000–120000，默认 30000 |
+| `timeoutMs` | integer | | 超时毫秒，1000–600000，默认 60000 |
 
 ```
 adb_shell { command: "getprop ro.build.version.release" }   → 16
@@ -250,7 +250,7 @@ adb_shell { command: "echo 中文也可以" }
 
 | 边界 | 说明 |
 |---|---|
-| 超时 | 默认 30 秒，最长 120 秒 |
+| 超时 | 默认 60 秒，最长 600 秒 |
 | 输出上限 | 32MB，超出返回失败但前 32MB 仍在 |
 | 编码 | 按 UTF-8 解码，二进制内容（直接 `cat` 图片）会损坏 |
 | stdin | 不支持，交互式命令（`top`、`vi`）用不了 |
@@ -285,7 +285,7 @@ adb_install { path: "/sdcard/Download/app.apk" }
 
 | 参数 | 类型 | 说明 |
 |---|---|---|
-| `lines` | integer | 取多少行，默认 200，最大 5000 |
+| `lines` | integer | 取多少行，默认 200，最大 20000 |
 | `filter` | string | 过滤规则，**支持正则**（走 `grep -E`）。简单单词也是合法的正则 |
 
 ```

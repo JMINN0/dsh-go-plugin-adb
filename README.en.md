@@ -215,7 +215,7 @@ Run a shell command. The most used tool. **No blocking, no allowlist, no confirm
 | Parameter | Type | Required | Description |
 |---|---|---|---|
 | `command` | string | ✅ | the command; pipes, redirection, `&&`, `$()` all work |
-| `timeoutMs` | integer | | timeout in ms, 1000–120000, default 30000 |
+| `timeoutMs` | integer | | timeout in ms, 1000–600000, default 60000 |
 
 ```
 adb_shell { command: "getprop ro.build.version.release" }   → 16
@@ -258,7 +258,7 @@ Tail the log without leaving a long-running process behind.
 
 | Parameter | Type | Description |
 |---|---|---|
-| `lines` | integer | how many lines, default 200, max 5000 |
+| `lines` | integer | how many lines, default 200, max 20000 |
 | `filter` | string | filter rule, **regex supported** (runs `grep -E`); a plain word is a valid regex |
 
 ```

@@ -105,7 +105,7 @@ export function logcatSpec() {
     description: [
       '读 logcat 尾部（读多久由 lines 决定）。不会留长驻进程。',
       '',
-      'filter 走 grep -E，**是真正则**：可以是 "FATAL"、"AndroidRuntime|ANR"、"(?i)exception"。',
+      'filter 走 grep -E，**是真正则**：可以是 "FATAL"、"AndroidRuntime|ANR"、"[Ee]xception"。',
       '没有专门的 tag 过滤参数——按 tag 过滤就写正则，比如 "ActivityManager"。',
       '匹配不到不算错误，会明确告诉你"最近 N 行里没有匹配 …"。',
     ].join('\n'),

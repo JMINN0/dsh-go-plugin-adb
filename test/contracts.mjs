@@ -56,5 +56,9 @@ for (const c of CANDIDATES.filter(Boolean)) {
 }
 
 console.log(`\n工具定义 ${SPEC_FILES.length} 个，宿主编译 ${compiled} 个，异常 ${bad} 条`);
-if (compiled === 0) console.log('（未找到宿主 defineTool，只做了基础字段校验）');
+if (compiled === 0) {
+  console.log('⚠ 未找到宿主 defineTool：只做了基础字段校验，没有真正编译。');
+  console.log('  生产环境应该能找到 /opt/dsh/node_modules/@deepseek-ai/dsh-tools；');
+  console.log('  找不到时说明这份判定不完整，别当成"已通过"发布。');
+}
 process.exit(bad ? 1 : 0);

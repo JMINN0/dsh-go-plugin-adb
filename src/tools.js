@@ -114,7 +114,9 @@ export async function install(args) {
   if (args?.downgrade === true) flags.push('-d');
   flags.push(path);
 
-  const r = await adbConn.withConn((target) => adb(flags, { target, timeout: 180000 }));
+  // 安装大包经常超过 3 分钟，默认 180s 但允许调用方加长
+  const installTimeout = Math.min(Math.max(Number(args?.timeoutMs) || 180000, 5000), 600000);
+  const r = await adbConn.withConn((target) => adb(flags, { target, timeout: installTimeout }));
   const raw = String(r.text || '').trim();
   if (/Success/i.test(raw)) return { text: `安装成功：${path}` };
 
@@ -131,10 +133,6 @@ export async function install(args) {
 export async function logcat(args) {
   const lines = Math.min(Math.max(Number(args?.lines) || 200, 1), 20000);
   const filter = args?.filter ? String(args.filter) : '';
-
-  if (filter && !FILTER_CHARS.test(filter)) {
-    return { text: `filter 含不支持的字符：${JSON.stringify(filter)}\n只允许字母数字、. / : = | ( ) [ ] ^ $ * + ? 空格和连字符（走 grep -E 正则）` };
-  }
 
   // clear 参数（以前只在 schema 里声明、实现里从不读，等于给模型撒谎）：先清空缓冲再抓
   if (args?.clear === true) {
@@ -181,8 +179,12 @@ export async function screencap(args) {
 
   const localPath = args?.localPath ? String(args.localPath) : '';
   if (localPath) {
-    const pulled = await adbConn.adb(['pull', remote, localPath], { timeout: 60000 });
-    lines.push(pulled.ok ? `已拉到本地：${localPath}` : `拉取失败：${pulled.err}`);
+    // 必须带 -s target：本机 `adb devices` 恒有两条（127.0.0.1:5555 和 emulator-5554，
+    // 后者是 adb 把 5555 当模拟器扫描段的产物），不带 -s 会报 "more than one device"。
+    const pulled = await adbConn.withConn(
+      (target) => adb(['pull', remote, localPath], { target, timeout: 60000 }),
+    );
+    lines.push(pulled.ok ? `已拉到本地：${localPath}` : `拉取失败：${pulled.text || pulled.err || '(无错误信息)'}`);
   }
   return { text: lines.join('\n') };
 }
