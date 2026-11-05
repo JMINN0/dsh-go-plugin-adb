@@ -1,63 +1,396 @@
 # dsh-go-plugin-adb
 
-Give the agent a real adb shell **from inside the phone**. Not "PC controls phone" — the agent runs on the device and talks to its own adbd.
+Give an agent a real adb shell **from inside the phone**. This is not "PC connects to phone" — it is "the agent lives in this phone and connects to itself".
+
+English ｜ [中文](README.md)
+
+| Item | Value |
+|---|---|
+| Version | 2026.1105.1908 (year.monthday.hourminute — the number tells you exactly when it was built) |
+| Verified on | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
+| Tools | 6 |
+| Root required | **No** |
+| Stability | 10/10 stability suite + 28/28 dangerous-command guard |
+
+---
+
+## 1. What this is
+
+DSH Go runs inside a proot Ubuntu on an Android phone. This plugin lets it use `adb` commands to operate **the very phone it lives on**: install and uninstall packages, read logcat, run arbitrary shell commands (uid 2000), take screenshots, inspect system state.
+
+**The problem it solves**: before this, operating the phone meant either a PC with a USB cable, or poking the screen through accessibility. This plugin gives the agent a shell inside its own body.
+
+---
+
+## 2. The port is still 5555 — but it connects over loopback
+
+To be precise: **the port is still 5555**; this plugin does not change it. What changes is *which address* you connect to — a LAN IP in the usual setup, `127.0.0.1` here.
+
+After `adb tcpip 5555`, adbd listens on `[::]:5555` — the **entire network stack**, not just loopback. The agent connects to `127.0.0.1:5555`, so traffic stays on the loopback interface:
+
+- ✅ survives Wi-Fi off and airplane mode
+- ✅ no router, no shared LAN needed
+- ⚠️ but **other machines on the same LAN can also reach that port** (they still need this phone's adb private key)
+
+Run `adb usb` or turn wireless debugging off to close it again.
+
+---
+
+## 3. Prerequisites
+
+1. An Android phone with Developer options enabled
+2. Wireless debugging available (for the one-time pairing)
+3. The proot environment can install the adb client:
 
 ```bash
-dsh plugin --profile web add git+https://github.com/<you>/dsh-go-plugin-adb
+apt-get update && apt-get install -y android-tools-adb
+adb version
+# Android Debug Bridge version 1.0.41
 ```
 
-## Why it survives Wi-Fi being off
+> Note: upgrading the DSH Go runtime image wipes apt-installed packages, so adb must be reinstalled afterwards. This happened in practice.
 
-`adb tcpip <port>` puts adbd on `[::]:<port>` — the whole network stack, not just loopback. The agent connects to `127.0.0.1:<port>`, i.e. over loopback, so turning Wi-Fi off (or airplane mode) does not break it.
+---
 
-To be precise: it works because the listener *includes* loopback, not because loopback is the only listener. Other machines on the same LAN can reach that port too (they still need your adb private key). Revoke with `adb usb` or by turning wireless debugging off.
+## 4. Install
 
-## One-time pairing
+### 4.1 Where the package comes from
+
+`dsh plugin add` accepts two kinds of target:
+
+**Option A — a local directory** (what you want after cloning from GitHub)
 
 ```bash
-apt-get install -y android-tools-adb
-# phone: Developer options -> Wireless debugging -> on; read the pairing code + port
-adb pair 127.0.0.1:<pair-port>
-adb connect 127.0.0.1:<debug-port>
+git clone https://github.com/JMINN0/dsh-go-plugin-adb.git
+cd dsh-go-plugin-adb
+dsh plugin --profile web add .
+```
+
+The `.` means "the current directory". **You must be inside the repository directory**, or it reports that the package cannot be found.
+
+**Option B — a published package name** (if the package is published to an npm registry)
+
+```bash
+dsh plugin --profile web add dsh-go-plugin-adb
+```
+
+### 4.2 What `--profile web` means
+
+DSH can have several profiles. The one used by the phone's built-in engine is called `web`.
+
+- Without `--profile`, the plugin is installed into the default profile and **the phone app will not load it**
+- You must pass `--profile web` for the tools to appear on your phone
+
+### 4.3 Restart the engine afterwards
+
+Installing only changes configuration; it does not reload code. **Restart the engine once**:
+
+**Path: in the app → Settings → Engine → Restart engine**
+
+Without the restart, no `adb_*` tools appear. This is the step people miss most often.
+
+### 4.4 Verify the install
+
+```bash
+# 1. is it in the config?
+python3 -c "
+import json
+d=json.load(open('$HOME/.dsh/profiles/web/package.json'))
+print([b for b in d['dsh']['profile']['bundles'] if 'adb' in b])"
+# expected: ['dsh-go-plugin-adb']
+
+# 2. did the engine load it? (no 'apply failed' means good)
+grep -i "apply failed" ~/.dsh/dsh-app/diagnostics.md 2>/dev/null | grep adb || echo "no load errors ✅"
+```
+
+---
+
+## 5. One-time pairing (first time only)
+
+**Order matters. Skipping a step gives `no devices/emulators found`.**
+
+```bash
+# 1. Phone: Developer options → Wireless debugging → Pair device with pairing code
+#    The screen shows:
+#      - a pairing IP:port   (e.g. 192.168.1.100:37123)
+#      - a 6-digit pairing code
+#    The main Wireless debugging screen also shows an "IP address & Port"
+#    (e.g. 192.168.1.100:41000) — that is NOT the pairing port. Note both.
+
+# 2. Pair (using the pairing port)
+adb pair 192.168.1.100:37123
+# Enter the 6-digit code when prompted
+# Success shows: Successfully paired to ...
+
+# 3. DO NOT SKIP — connect to the wireless-debug port first.
+#    adb needs a connected device before the next step can work.
+adb connect 192.168.1.100:41000
+# Success shows: connected to 192.168.1.100:41000
+
+# 4. Fix the port to 5555 (this fails with "no devices/emulators found" if you skipped step 3)
 adb tcpip 5555
+# Success shows: restarting in TCP mode port: 5555
+
+# 5. Connect over loopback (note: 127.0.0.1 here, not the LAN IP)
 adb connect 127.0.0.1:5555
+adb -s 127.0.0.1:5555 shell id
+# uid=2000(shell) gid=2000(shell) groups=... context=u:r:shell:s0
 ```
 
-The pairing code can only come from a human. The plugin does not promise one-click setup; it promises you never touch it again after pairing.
+**Why step 5 uses 127.0.0.1**: after `adb tcpip 5555`, adbd listens on `[::]:5555`, so a loopback connection works too — and bypasses Wi-Fi entirely.
 
-## Port selection
+After pairing, the key lives in `~/.android/adbkey`, so you never pair again, even after reinstalling adb.
 
-Candidates: last known good port (`state.json`) → 5555 → 6555 → 7555 → 8555 → 9555.
-Two phases: connect to every candidate first (cheap, non-invasive); only if all fail, migrate adbd with `tcpip`.
+**After a phone reboot** the `adb tcpip` setting is lost; redo step 4 (and step 3 first if the device is no longer connected).
 
-Ports 5554–5585 are treated by adb as *emulator* ports — probing them spawns bogus `emulator-55xx` entries, so fallbacks deliberately avoid that range and such entries are filtered out.
+| Error | Cause | Fix |
+|---|---|---|
+| `no devices/emulators found` at step 4 | step 3 was skipped | go back and run step 3 |
+| `failed to authenticate` | key mismatch | revoke USB debugging authorisations on the phone, pair again |
+| `cannot connect to 127.0.0.1:5555` | `tcpip` did not take effect | redo steps 3 and 4 |
+| `connection refused` | adbd is not listening on 5555 | phone rebooted — redo step 4 |
 
-## Auto-recovery
+---
 
-No daemon: recovery happens on each tool call.
-- `ensure()` on every call — cached port first, full re-discovery if stale
-- Transient errors only (`device offline`, `protocol fault`, …) trigger one `kill-server` + retry; command-level failures are **not** retried
-- After a reboot adbd returns on a random wireless-debugging port. The plugin reads it from `adb mdns services` (`_adb-tls-connect._tcp`), connects, then pins it back — no user input needed
+## 6. The six tools
 
-## Tools
+### `adb_devices`
 
-`adb_devices`, `adb_reconnect`, `adb_shell`, `adb_install`, `adb_logcat`, `adb_screencap`.
+List connected devices. No parameters.
 
-## Capability boundary (tested 2026-11-04)
+```
+adb_devices
+→ 127.0.0.1:5555  device
+```
 
-Works: `pm list/path/install/uninstall`, `am start`, `logcat`, `dumpsys`, `screencap`, `pull/push`, `input`.
-Does not: read `/data/data` or `/data/app` (SELinux); `run-as` only on debuggable packages; no root.
+### `adb_shell`
 
-Restore an uninstalled system app: `pm install-existing --user 0 <pkg>`.
+Run a shell command. The most used one.
 
-## Security
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `command` | string | ✅ | command to run |
+| `timeoutMs` | integer | | timeout in ms, default 30000, max 120000 |
+| `confirm` | boolean | | dangerous commands require `true` |
 
-This is a **uid 2000 shell**. Destructive commands (`pm uninstall` / `clear` / `disable`, `cmd package …`, deleting user data, `reboot`) are refused unless `confirm: true`. All user-supplied strings that reach a shell are whitelist-validated (injection through paths is rejected, not escaped). Uninstall only after reading the APK's real label with `aapt` — package names lie.
+**Can the command use pipes and `&&`? Yes.** The whole string is handed to `adb shell`, so all of these are valid:
 
-## Not verified
+```
+adb_shell { command: "pm list packages | grep tencent" }
+adb_shell { command: "getprop ro.product.model && getprop ro.build.version.release" }
+adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
+```
 
-Only one device was available: Android 16, adb 34.0.4, Node 24.22.1. Behaviour on Android 11–13 and older adb builds is **untested**.
+**Return value**: `{ text: "..." }`. Returns `(无输出)` when the command produces nothing, and `没有可用连接：...` when the connection layer fails. A failing command (e.g. grep with no match) is **not** a connection failure — `text` still contains output.
+
+**Dangerous-command blocklist** — these are refused unless you pass `confirm: true`. This is a **blocklist**, not an allowlist:
+
+- `pm uninstall <pkg>`
+- `pm clear <pkg>`
+- `pm disable <pkg>` / `pm disable-user <pkg>`
+- write operations under `cmd package` (e.g. `cmd package uninstall`)
+- `rm -rf /sdcard` and variants
+- `reboot` / `recovery`
+
+**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The guard passes 28/28 tests, including quote-based bypasses such as `pm "uninstall" com.foo.bar`.
+
+**After a refusal**: explain the consequence to the user, get consent, then resend with `confirm: true`. Before uninstalling anything, read the APK's real display name with aapt — package names lie.
+
+### `adb_install`
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `path` | string | ✅ | **device-side** absolute path, e.g. `/sdcard/Download/app.apk` |
+| `reinstall` | boolean | | adds `-r`, keeps data, default true |
+| `downgrade` | boolean | | adds `-d`, allows downgrade, default false |
+
+```
+adb_install { path: "/sdcard/Download/app.apk" }
+→ Success    or    Failure [INSTALL_FAILED_...]
+```
+
+**Path namespace**: `path` must be a **device path** (`/sdcard/...`), not a proot path. The device cannot see `/root/...`; push the file first.
+
+Common failures: `INSTALL_FAILED_UPDATE_INCOMPATIBLE` (signature mismatch — uninstall the old one first or re-sign with the same key), `INSTALL_FAILED_VERSION_DOWNGRADE` (pass `downgrade: true`), `INSTALL_FAILED_INSUFFICIENT_STORAGE`.
+
+### `adb_logcat`
+
+Tail the log without leaving a long-running process behind.
+
+| Parameter | Type | Description |
+|---|---|---|
+| `lines` | integer | how many lines, default 200, max 5000 |
+| `filter` | string | filter rule, **regex supported** (runs `grep -E`); a plain word is a valid regex |
+| `clear` | boolean | clear the buffer first |
+
+```
+adb_logcat { filter: "FATAL", lines: 100 }
+adb_logcat { filter: "AndroidRuntime|FATAL|ANR", lines: 200 }
+adb_logcat { clear: true, filter: "AndroidRuntime" }
+```
+
+Returns the plain-text tail. No match returns empty content, not an error.
+
+### `adb_screencap`
+
+Both parameters are optional — `adb_screencap {}` is valid and captures the main display to the default path.
+
+| Parameter | Type | Required | Description |
+|---|---|---|---|
+| `outPath` | string | | device-side path, default `/sdcard/dsh-screencap.png` |
+| `localPath` | string | | also pull back to this proot path, e.g. `/tmp/shot.png` |
+
+```
+adb_screencap {}
+adb_screencap { outPath: "/sdcard/a.png", localPath: "/tmp/a.png" }
+```
+
+It captures the **main display**. Capturing a virtual display is the job of `dsh-go-plugin-screen`, not this plugin.
+
+### `adb_reconnect`
+
+Force a fresh connection: kill the local adb server, restart it, migrate the wireless-debug port to 5555, verify uid 2000. No parameters.
+
+Use after a phone reboot, or when `adb_devices` shows offline. If the automatic recovery fails, the returned text says which step failed — then redo section 5.
+
+---
+
+## 7. What it can and cannot do
+
+**Can do** (all verified):
+
+```bash
+pm list packages / pm path / pm install / pm uninstall
+am start / am force-stop / am broadcast
+logcat / dumpsys / getprop / settings
+screencap / input / cmd window / cmd notification
+```
+
+⚠️ write operations under `cmd package` (uninstall / clear / disable) are on the blocklist and need `confirm: true`; read operations such as `cmd package list packages` are not restricted.
+
+**There is no dedicated pull/push tool** among the six. To move files around, use `adb_shell` with `cp` / `mkdir` on the device, or run `adb push` from the proot command line (outside the plugin).
+
+**Cannot do**:
+
+| Limitation | Reason |
+|---|---|
+| read `/data/data`, `/data/app` | blocked by SELinux for uid 2000 |
+| `run-as` other apps | only works for debuggable packages |
+| anything requiring root | no root |
+| cross-user access | current user only |
+
+---
+
+## 8. Stability and compatibility
+
+**Stability 10/10** — what each test means (`ensure` is the plugin's internal "make sure the connection works" step, not a tool):
+
+| Test | Meaning |
+|---|---|
+| consecutive ensure ×30 | 30 repeat connection requests, average 33 ms, slowest 56 ms |
+| consecutive shell ×30 | 30 commands in a row, all succeed |
+| `kill-server` ×5 self-heal | killing the adb server 5 times, plugin restarts it each time |
+| `disconnect` ×3 self-heal | manual disconnects, plugin reconnects |
+| corrupt state file falls back | a broken `state.json` does not break usage |
+| wrong port falls back | dead port in state file → retries 5555 |
+| concurrent ensure ×3 | three simultaneous requests do not collide |
+| timeout does not hang | stuck commands return an error instead of hanging the plugin |
+| missing adb does not kill the process | returns a readable error, **does not crash the engine** |
+| unwritable state file does not crash | still works on a read-only disk |
+
+**Compatibility**:
+
+| Verified | Not verified |
+|---|---|
+| Android 16 | Android 11–15, Android 10 and older |
+| adb 34.0.4 | adb below 1.0.39 |
+| nubia NX809J | Samsung / Xiaomi / Pixel adbd |
+| Linux proot | Windows / macOS hosts |
+
+Port auto-negotiation order: `state.port` → 5555 → 6555 → 7555 → 8555 → 9555 (avoids the emulator range 5554–5585). The chosen port is stored in `~/.dsh/plugin-adb/state.json`:
+
+```json
+{ "port": 5555, "lastOkAt": 1793871234567 }
+```
+
+---
+
+## 9. Return-value contract
+
+Every tool returns `{ text: string }` and never throws.
+
+| Tool | Success | Failure |
+|---|---|---|
+| `adb_shell` | command stdout + stderr | starts with `没有可用连接：` or `已拒绝：` |
+| `adb_devices` | device list | `没有可用连接：...` |
+| `adb_install` | `Success` | `Failure [INSTALL_FAILED_...]` |
+| `adb_logcat` | log tail (empty string if no match) | — |
+| `adb_screencap` | `已保存：<path>` | `截图失败：<error>` |
+| `adb_reconnect` | steps taken + uid 2000 verification | failure reason |
+
+**How to tell success from failure**: check whether the text starts with `没有可用连接` or `已拒绝`. If not, the command executed.
+
+---
+
+## 10. Uninstall and rollback
+
+```bash
+# 1. remove from the profile
+dsh plugin --profile web remove dsh-go-plugin-adb
+
+# 2. restart the engine (app → Settings → Engine → Restart)
+```
+
+Verify removal with the same command as section 4.4; the expected output is `[]`.
+
+**Uninstalling the plugin does not undo system changes.** For example, the port opened by `adb tcpip 5555` stays. To close it, run `adb usb` (if a cable is connected) or turn wireless debugging off on the phone.
+
+To clean up completely, delete `~/.dsh/plugin-adb/state.json` after uninstalling (it only stores the port and last success time).
+
+---
+
+## 11. Troubleshooting
+
+**Tools do not appear after install** — restart the engine (section 4.3). If they still do not appear:
+
+```bash
+# check the bundle list
+python3 -c "
+import json;d=json.load(open('$HOME/.dsh/profiles/web/package.json'))
+print(d['dsh']['profile']['bundles'])" | grep adb
+
+# check for load errors
+grep -i "apply failed" ~/.dsh/dsh-app/diagnostics.md 2>/dev/null | grep adb
+```
+
+If `diagnostics.md` does not exist, the engine has not written it yet — start the app once, or check the engine page in the app.
+
+**`device not found`** — run `adb connect 127.0.0.1:5555`. Still failing? The port record may be stale: read `~/.dsh/plugin-adb/state.json` to see which port the plugin last used, then `adb connect 127.0.0.1:<that port>`. If the phone rebooted, redo section 5.
+
+**`unauthorized`** — the key is gone. Revoke USB debugging authorisations on the phone and repeat section 5.
+
+**`adb: command not found`** — `apt-get update && apt-get install -y android-tools-adb`.
+
+**`offline`** — the port is open but adbd is not answering. Call `adb_reconnect`.
+
+---
+
+## 12. How it works
+
+```
+Agent (proot Ubuntu)
+   ↓ adb -s 127.0.0.1:5555 shell ...
+adb client (uid 2000)
+   ↓ loopback TCP 127.0.0.1:5555
+adbd (Android system)
+   ↓
+Android system services (pm / am / dumpsys / input / screencap ...)
+```
+
+No private interfaces — everything uses the standard adb protocol.
+
+---
 
 ## License
 
-MIT
+MIT. See [LICENSE](LICENSE).

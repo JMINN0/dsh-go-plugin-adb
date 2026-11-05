@@ -1,6 +1,6 @@
 {
   "name": "dsh-go-plugin-adb",
-  "version": "0.1.1",
+  "version": "2026.1105.1908",
   "description": "Direct adb from inside the phone: the agent talks to this device's own adbd over loopback (127.0.0.1:5555), so it keeps working with Wi-Fi off. uid 2000 shell — pm install, am start, logcat, dumpsys, screencap.",
   "keywords": [
     "dsh",

@@ -1,6 +1,6 @@
 # 稳定性与兼容性说明
 
-版本：0.1.1 ｜ 最后验证：2026-11-05 ｜ 验证环境：nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4
+版本：2026.1105.1908 ｜ 最后验证：2026-11-05 ｜ 验证环境：nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4
 
 ## 一句话
 
