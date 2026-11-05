@@ -1,4 +1,9 @@
 node_modules/
 *.log
-*.bak-*
 *.tgz
+.env
+# 备份文件一律不进仓库（含 .bak / .bak2 / .bak-时间戳 各种写法）
+*.bak
+*.bak2*
+*.bak-*
+*.bak.*

@@ -10,7 +10,7 @@ English ｜ [中文](README.md)
 | Verified on | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | Tools | 6 |
 | Root required | **No** |
-| Stability | 10/10 stability suite + 28/28 dangerous-command guard |
+| Stability | 10/10 stability suite + 40/40 dangerous-command guard |
 
 ---
 
@@ -226,7 +226,7 @@ adb_shell { command: "getprop ro.product.model && getprop ro.build.version.relea
 adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 ```
 
-**Return value**: `{ text: "..." }`. Returns `(无输出)` when the command produces nothing, and `没有可用连接：...` when the connection layer fails. A failing command (e.g. grep with no match) is **not** a connection failure — `text` still contains output.
+**Return value**: `{ text: "..." }`. Returns `(无输出)` when the command produces nothing, and `连不上，已试过端口：...` when the connection layer fails. A failing command (e.g. grep with no match) is **not** a connection failure — `text` still contains output.
 
 **Dangerous-command blocklist** — these are refused unless you pass `confirm: true`. This is a **blocklist**, not an allowlist:
 
@@ -237,7 +237,7 @@ adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 - `rm -rf /sdcard` and variants
 - `reboot` / `recovery`
 
-**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The guard passes 28/28 tests, including quote-based bypasses such as `pm "uninstall" com.foo.bar`.
+**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The guard passes 40/40 tests, including quote-based bypasses such as `pm "uninstall" com.foo.bar`.
 
 **After a refusal**: explain the consequence to the user, get consent, then resend with `confirm: true`. Before uninstalling anything, read the APK's real display name with aapt — package names lie.
 
@@ -266,7 +266,6 @@ Tail the log without leaving a long-running process behind.
 |---|---|---|
 | `lines` | integer | how many lines, default 200, max 5000 |
 | `filter` | string | filter rule, **regex supported** (runs `grep -E`); a plain word is a valid regex |
-| `clear` | boolean | clear the buffer first |
 
 ```
 adb_logcat { filter: "FATAL", lines: 100 }
@@ -274,7 +273,7 @@ adb_logcat { filter: "AndroidRuntime|FATAL|ANR", lines: 200 }
 adb_logcat { clear: true, filter: "AndroidRuntime" }
 ```
 
-Returns the plain-text tail. No match returns empty content, not an error.
+Returns the plain-text tail. No match returns `（最近 N 行里没有匹配 "X" 的内容）` — a normal result, not an error.
 
 ### `adb_screencap`
 

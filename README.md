@@ -10,7 +10,7 @@
 | 验证环境 | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | 工具数 | 6 |
 | 需要 root | **不需要** |
-| 稳定性 | 10/10 稳定性套件 + 28/28 危险命令拦截 |
+| 稳定性 | 10/10 稳定性套件 + 40/40 危险命令拦截 |
 
 ---
 
@@ -253,7 +253,7 @@ adb_shell { command: "getprop ro.product.model && getprop ro.build.version.relea
 adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 ```
 
-**返回值**：`{ text: "..." }`。命令无输出时返回 `(无输出)`；连接层面失败会返回 `没有可用连接：...`。注意：命令本身跑失败（比如 grep 没匹配到）**不算**连接失败，`text` 里会有内容。
+**返回值**：`{ text: "..." }`。命令无输出时返回 `(无输出)`；连接层面失败会返回 `连不上，已试过端口：...`。注意：命令本身跑失败（比如 grep 没匹配到）**不算**连接失败，`text` 里会有内容。
 
 **危险命令拦截名单**：下面这些必须显式传 `confirm: true`，否则直接拒绝执行（注意这是**拦截**名单，不是"白名单"——早期版本用错了术语）：
 
@@ -264,7 +264,7 @@ adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 - `rm -rf /sdcard` 及其变体
 - `reboot` / `recovery`
 
-**`confirm` 的语义**：只有传 `true` 才放行；传 `false` 和不传**完全等价**（都会被拒）。拦截测试 28/28 通过，包括用引号绕过的变体：
+**`confirm` 的语义**：只有传 `true` 才放行；传 `false` 和不传**完全等价**（都会被拒）。拦截测试 40/40 通过，包括用引号绕过的变体：
 
 ```
 pm "uninstall" com.foo.bar     ← 同样被拦
@@ -302,18 +302,15 @@ adb_install { path: "/sdcard/Download/app.apk" }
 |---|---|---|
 | `lines` | integer | 取多少行，默认 200，最大 5000 |
 | `filter` | string | 过滤规则，**支持正则**（走 `grep -E`）。简单单词也是合法的正则 |
-| `clear` | boolean | 先清空缓冲区 |
 
 ```
 // 单关键词
 adb_logcat { filter: "FATAL", lines: 100 }
 // 正则：多个关键词或起来
 adb_logcat { filter: "AndroidRuntime|FATAL|ANR", lines: 200 }
-// 清空缓冲区后再抓，只看接下来发生的事
-adb_logcat { clear: true, filter: "AndroidRuntime" }
 ```
 
-返回值是纯文本尾部。匹配不到时返回空内容，不报错。
+返回值是纯文本尾部。匹配不到时返回 `（最近 N 行里没有匹配 "X" 的内容）`，这是正常结果不是错误。
 
 ### `adb_screencap`
 
@@ -460,7 +457,7 @@ adb devices:
 
 | 情况 | 实际返回 |
 |---|---|
-| 成功 | `Success` |
+| 成功 | `安装成功：<设备路径>` |
 | 失败 | `Failure [INSTALL_FAILED_xxx: 原因]` |
 
 常见失败码：`INSTALL_FAILED_UPDATE_INCOMPATIBLE`（签名不一致）、`INSTALL_FAILED_VERSION_DOWNGRADE`（需 `downgrade: true`）、`INSTALL_FAILED_INSUFFICIENT_STORAGE`（空间不足）。

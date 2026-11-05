@@ -18,28 +18,53 @@ import * as adbConn from './adb.js';
 /**
  * 危险命令拦截。
  *
- * 定位：**防手滑，不是安全边界**。真正的沙箱要靠系统权限，这里只是拦掉误触。
- * 判据是"先剥引号再匹配"，这样 `p""m uninstall`、`pm un"install"`、`cmd "package" uninstall`
- * 都会还原成正常形式被抓住（审查实测这三种原本都能过）。
+ * 定位：**防手滑，不是安全边界**（拦不住 `$(echo cm0)` 动态拼接、alias、自写脚本）。
  *
- * 但仍然拦不住 `$(echo cm0)` 这种动态拼接、alias、自己写脚本——所以文档里明确写"不是安全边界"。
+ * 判据不是"剥掉引号再匹配"——那会误伤 `echo "rm -rf /sdcard"` 这类只是想打印字符串的命令，
+ * 而误伤的后果比漏拦更糟：调用方会学着无脑带 confirm:true，拦截等于失效（上一轮实测误伤 8/13）。
+ *
+ * 现在的判据是**按命令段锚定**：危险动词必须出现在一个命令段的**开头**（行首，或 ; & | && || 之后，
+ * 或 sudo/su -c/sh -c/busybox 这类包装命令之后）。于是：
+ *   `echo "rm -rf /sdcard"`      → rm 不在段首，放行 ✅
+ *   `grep "pm uninstall" f.txt`  → pm 不在段首，放行 ✅
+ *   `pm "uninstall" com.x`       → pm 在段首，拦住 ✅
+ *   `p""m uninstall com.x`       → 词内引号用 p["']*m 容忍，拦住 ✅
+ *   `cd /sdcard && rm -rf *`     → && 之后是段首，拦住 ✅
  */
+const SEG = String.raw`(?:^|[;&|]\s*|\b(?:sudo|doas|busybox|toybox|sh|bash)\s+(?:-c\s+)?)`;
+
+/**
+ * 只剥"词内引号"：引号两侧都是字母数字才剥。
+ *   `pm un"install"` → `pm uninstall`   （拦）
+ *   `p""m uninstall` → `pm uninstall`   （拦）
+ *   `echo "rm -rf /sdcard"` → 不变       （放行，引号两侧是空格）
+ */
+const dequoteIntraWord = (cmd) => String(cmd).replace(/(\w)["']+(?=\w)/g, '$1');
 const DANGEROUS = [
-  /\bpm\s+(uninstall|clear|disable)\b/,
-  /\bcmd\s+package\s+(uninstall|clear|disable)\b/,
-  /\brm\s+(-\S+\s+)*\/(sdcard|storage|data)(\/|\s|$)/,
-  /(^|[;&|])\s*(reboot|recovery)(\s|$)/,
-  // 审查点名的绕过手法
-  /\bsu\s+-c\s+reboot\b/,
-  /\bsvc\s+power\s+reboot\b/,
-  /\bfind\s+\/(sdcard|storage|data)[^|;]*\s-delete\b/,
-  /\brm\s+-\S*\s+\*\s*$/,
-  /\bpm\s+list\s+packages\s+-u\b.*&&.*\bpm\s+(uninstall|clear)/,
+  // 包操作：词内允许引号（p["']*m 抓 p""m）
+  new RegExp(`${SEG}\\s*p["']*m\\s+["']?(uninstall|clear|disable)`, 'i'),
+  new RegExp(`${SEG}\\s*cmd\\s+["']?package["']?\\s+["']?(uninstall|clear|disable)`, 'i'),
+  // 删除受保护目录
+  new RegExp(`${SEG}\\s*rm\\s+(?:-\\S+\\s+)*["']?\\/(sdcard|storage|data)`, 'i'),
+  // 段首的 rm -rf *（配合 cd 进危险目录）
+  new RegExp(`${SEG}\\s*rm\\s+-\\S+\\s+\\*`, 'i'),
+  // find ... -delete
+  new RegExp(`${SEG}\\s*find\\s+\\/(sdcard|storage|data)[^|;]*\\s-delete`, 'i'),
+  // 重启类
+  new RegExp(`${SEG}\\s*(reboot|recovery)(\\s|$)`, 'i'),
+  new RegExp(`${SEG}\\s*su\\s+-c\\s+["']?\\s*(reboot|rm\\s|pm\\s+uninstall)`, 'i'),
+  new RegExp(`${SEG}\\s*svc\\s+power\\s+reboot`, 'i'),
 ];
 
-/** 剥掉引号后再匹配，抓 `p""m` / `pm un"install"` 这类拼接绕过。 */
-function normalizeForGuard(cmd) {
-  return String(cmd).replace(/["']/g, '');
+
+/**
+ * 判断一条命令是否命中危险拦截名单。
+ * 导出给测试用——测试直接 import 这个函数，不再从源码里抠字符串 eval
+ * （之前那样做，模板字面量一变测试就崩，而且测的未必是线上路径）。
+ */
+export function isDangerous(cmd) {
+  const view = dequoteIntraWord(String(cmd ?? ''));
+  return DANGEROUS.some((re) => re.test(view));
 }
 
 /** 只允许这些字符进 shell：字母数字、下划线、点、斜杠、连字符、冒号、空格、= */
@@ -97,8 +122,7 @@ export async function shell(args) {
   const cmd = String(args?.command || '').trim();
   if (!cmd) return { text: '缺少 command' };
 
-  const normalized = normalizeForGuard(cmd);
-  if (DANGEROUS.some((re) => re.test(normalized)) && args?.confirm !== true) {
+  if (isDangerous(cmd) && args?.confirm !== true) {
     return {
       text: `已拒绝：这条命令会改用户数据或卸载/停用应用。\ncommand: ${cmd}\n\n` +
         '确认要执行的话，先跟用户说清楚后果，再带 confirm:true 重试。\n' +
@@ -150,13 +174,21 @@ export async function logcat(args) {
   // 单引号包裹，防注入；grep -E 支持 | 等正则语法
   const grepPart = filter ? ` | grep -E ${quoteSingle(filter)}` : '';
   const cmd = `logcat -d -t ${lines}${grepPart}`;
-  const r = await adbConn.withConn((target) => adb(['shell', cmd], { target, timeout: 30000 }), { idempotent: true });
-  // grep 无匹配时退出码是 1 —— 这是**正常结果**，不是错误。
-  // 以前把它显示成"命令失败"，用户以为插件坏了（实测踩过）。
-  if (r.code === 1 || /退出码 1$/.test(String(r.text || ''))) {
+  // 注意：**不标 idempotent**。之所以之前标了，是想着"grep 没匹配可以安全重试"，
+  // 但实测无匹配时会白跑两遍 + 一次全端口探测（3458ms、9 次 adb 调用）。
+  const r = await adbConn.withConn((target) => adb(['shell', cmd], { target, timeout: 30000 }));
+  const text = String(r ? r.text : '');
+  // 只有**明确的 grep 无匹配**才算正常结果；连接层失败不能被说成"没搜到"。
+  // 判据：文本里是 grep 的退出码 1（或纯空），且不含连接失败的特征词。
+  const looksLikeConnFailure = /连不上|没有可用连接|device offline|no devices|error: closed|protocol fault/i.test(text);
+  const grepNoMatch = (r && r.code === 1) || /退出码 1$/.test(text.trim());
+  if (grepNoMatch && !looksLikeConnFailure) {
     return { text: `（最近 ${lines} 行里没有匹配 ${JSON.stringify(filter || '*')} 的内容）` };
   }
-  return { text: String(r.text || '').trim() || '(无输出)' };
+  if (looksLikeConnFailure) {
+    return { text: `读日志失败（连接问题，不是没匹配到）：${text}` };
+  }
+  return { text: text.trim() || '(无输出)' };
 }
 
 export async function screencap(args) {
