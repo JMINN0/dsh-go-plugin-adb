@@ -362,20 +362,73 @@ There is no 5556/5557 in the list because **5554–5585 is the range Android emu
 
 ---
 
-## 9. Return-value contract
+## 9. Return-value contract (measured, not promised)
 
-Every tool returns `{ text: string }` and never throws.
+Every tool returns `{ text: string }` and never throws. Values below are **measured**.
 
-| Tool | Success | Failure |
-|---|---|---|
-| `adb_shell` | command stdout + stderr | starts with `没有可用连接：` or `已拒绝：` |
-| `adb_devices` | device list | `没有可用连接：...` |
-| `adb_install` | `Success` | `Failure [INSTALL_FAILED_...]` |
-| `adb_logcat` | log tail (empty string if no match) | — |
-| `adb_screencap` | `已保存：<path>` | `截图失败：<error>` |
-| `adb_reconnect` | steps taken + uid 2000 verification | failure reason |
+### `adb_shell`
 
-**How to tell success from failure**: check whether the text starts with `没有可用连接` or `已拒绝`. If not, the command executed.
+| Case | Actual `text` |
+|---|---|
+| normal output | the command's stdout |
+| success, no output | `(无输出)` |
+| **timeout** | `命令超时（2000ms 内没结束）。要更长时间就调大 timeoutMs。` plus the command |
+| **non-zero exit** | `命令失败（退出码 1）` plus the command (stderr appended on a `[stderr]` line if present) |
+| blocked by guard | `已拒绝：...` plus the command and retry guidance |
+| connection failure | `连不上，已试过端口：...` plus pairing steps |
+
+**Telling success from failure**: failure text contains `命令超时`, `命令失败`, `已拒绝`, or `连不上`.
+
+### `adb_devices`
+
+```
+adb devices:
+127.0.0.1:5555	device
+
+回环目标 127.0.0.1:5555: 已就绪（NX809J）
+记住的端口: 5555 · 上次成功: 1793888292386 · 重连次数: 0
+```
+
+### `adb_logcat`
+
+| Case | Actual return |
+|---|---|
+| match | the matching log lines |
+| **no match** | `（最近 20 行里没有匹配 "XXX" 的内容）` — **a normal result, not an error** |
+| invalid filter chars | `filter 含不支持的字符：...` plus the allowed set |
+
+`filter` runs through `grep -E` and **supports regex**: `"AndroidRuntime|FATAL|ANR"` works.
+
+### `adb_install`
+
+`Success`, or `Failure [INSTALL_FAILED_xxx: reason]`. Common codes: `UPDATE_INCOMPATIBLE` (signature mismatch), `VERSION_DOWNGRADE` (pass `downgrade: true`), `INSUFFICIENT_STORAGE`.
+
+### `adb_screencap`
+
+Two lines on success:
+
+```
+截图已保存：/sdcard/dsh-ct.png
+-rw-rw---- 1 u0_a490 media_rw 1575442 2026-11-05 22:18 /sdcard/dsh-ct.png
+```
+
+With `localPath` an extra `已拉到本地：/tmp/xxx.png` line appears.
+
+### `adb_reconnect`
+
+Returns the rebuild steps and result, including a uid 2000 verification line on success.
+
+---
+
+## 9.5 Where the dangerous-command guard stops
+
+**It prevents slips, it is not a security boundary.**
+
+Blocked (9/9 measured): direct forms, quote concatenation (`p""m uninstall`, `pm un"install"`, `cmd "package" uninstall`), `find /sdcard -delete`, `su -c reboot`, `svc power reboot`, `rm -rf *`.
+
+**Not blocked**: dynamic construction like `$(echo cm0)`, aliases, your own scripts, anything outside `adb shell`.
+
+Real protection requires OS-level permissions. This guard only reduces accidental damage.
 
 ---
 

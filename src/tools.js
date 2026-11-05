@@ -15,12 +15,32 @@ import { adb } from './adb.js';
 import * as adbConn from './adb.js';
 
 /** 会改用户数据/卸应用的命令，必须显式 confirm。 */
+/**
+ * 危险命令拦截。
+ *
+ * 定位：**防手滑，不是安全边界**。真正的沙箱要靠系统权限，这里只是拦掉误触。
+ * 判据是"先剥引号再匹配"，这样 `p""m uninstall`、`pm un"install"`、`cmd "package" uninstall`
+ * 都会还原成正常形式被抓住（审查实测这三种原本都能过）。
+ *
+ * 但仍然拦不住 `$(echo cm0)` 这种动态拼接、alias、自己写脚本——所以文档里明确写"不是安全边界"。
+ */
 const DANGEROUS = [
-  /\bpm\s+["']?(uninstall|clear|disable)["']?\b/,
-  /\bcmd\s+package\s+["']?(uninstall|clear|disable)["']?\b/,
+  /\bpm\s+(uninstall|clear|disable)\b/,
+  /\bcmd\s+package\s+(uninstall|clear|disable)\b/,
   /\brm\s+(-\S+\s+)*\/(sdcard|storage|data)(\/|\s|$)/,
   /(^|[;&|])\s*(reboot|recovery)(\s|$)/,
+  // 审查点名的绕过手法
+  /\bsu\s+-c\s+reboot\b/,
+  /\bsvc\s+power\s+reboot\b/,
+  /\bfind\s+\/(sdcard|storage|data)[^|;]*\s-delete\b/,
+  /\brm\s+-\S*\s+\*\s*$/,
+  /\bpm\s+list\s+packages\s+-u\b.*&&.*\bpm\s+(uninstall|clear)/,
 ];
+
+/** 剥掉引号后再匹配，抓 `p""m` / `pm un"install"` 这类拼接绕过。 */
+function normalizeForGuard(cmd) {
+  return String(cmd).replace(/["']/g, '');
+}
 
 /** 只允许这些字符进 shell：字母数字、下划线、点、斜杠、连字符、冒号、空格、= */
 const SAFE_TOKEN = /^[\w./:\-= ]+$/;
@@ -77,7 +97,8 @@ export async function shell(args) {
   const cmd = String(args?.command || '').trim();
   if (!cmd) return { text: '缺少 command' };
 
-  if (DANGEROUS.some((re) => re.test(cmd)) && args?.confirm !== true) {
+  const normalized = normalizeForGuard(cmd);
+  if (DANGEROUS.some((re) => re.test(normalized)) && args?.confirm !== true) {
     return {
       text: `已拒绝：这条命令会改用户数据或卸载/停用应用。\ncommand: ${cmd}\n\n` +
         '确认要执行的话，先跟用户说清楚后果，再带 confirm:true 重试。\n' +

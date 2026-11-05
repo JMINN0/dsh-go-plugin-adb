@@ -415,54 +415,82 @@ cat ~/.dsh/plugin-adb/state.json
 
 ---
 
-## 九、返回值契约（每个工具返回什么、失败长什么样）
+## 九、返回值契约（实测结果，不是承诺）
 
-这一节是给"想判断成败"的人看的。**所有工具都返回 `{ text: string }`，不抛异常。**
+所有工具都返回 `{ text: string }`，不抛异常。下面是**实测**的返回值，不是设计意图。
 
-### adb_shell
+### `adb_shell`
 
-| 情况 | 返回 text |
+| 情况 | 实际返回 text |
 |---|---|
-| 正常有输出 | 命令的 stdout + stderr |
-| 命令成功但无输出 | `(无输出)` |
-| 命令退出码非 0（如 grep 没匹配） | 仍然返回输出内容，**不额外标错误**——因为 adb shell 本身成功 |
-| 连接层面失败（没设备） | `没有可用连接：<原因>`，开头就是这句 |
-| 超时 | 返回 `没有可用连接：...`（超时被当成连接失败） |
-| 命中拦截名单且没传 confirm | `已拒绝：这条命令会改用户数据或卸载/停用应用。` + 命令原文 + 重试指引 |
+| 正常有输出 | 命令的 stdout |
+| 成功无输出 | `(无输出)` |
+| **超时** | `命令超时（2000ms 内没结束）。要更长时间就调大 timeoutMs。` + 命令原文 |
+| **退出码非 0** | `命令失败（退出码 1）` + 命令原文（如果 stderr 有内容，会附在 `[stderr]` 行后） |
+| 命中拦截名单 | `已拒绝：这条命令会改用户数据或卸载/停用应用。` + 命令原文 + 重试指引 |
+| 连接失败 | `连不上，已试过端口：...` + 三步配对指引 |
 
-**怎么判断成功**：看 text 开头是不是 `没有可用连接` 或 `已拒绝`。是就是失败，不是就是执行了。
+**怎么判断成功**：`text` 里含 `命令超时` / `命令失败` / `已拒绝` / `连不上` 就是失败。
 
-### adb_devices
+### `adb_devices`
 
-返回设备列表文本。没设备时返回 `没有可用连接：...`。
+返回形如：
 
-### adb_install
+```
+adb devices:
+127.0.0.1:5555	device
 
-| 情况 | 返回 |
+回环目标 127.0.0.1:5555: 已就绪（NX809J）
+记住的端口: 5555 · 上次成功: 1793888292386 · 重连次数: 0
+```
+
+没设备时：第一段是 `（没有任何设备）`，后面仍会给出端口状态。
+
+### `adb_logcat`
+
+| 情况 | 实际返回 |
+|---|---|
+| 有匹配 | 匹配到的日志行 |
+| **无匹配** | `（最近 20 行里没有匹配 "XXX" 的内容）`——**这是正常结果，不是错误** |
+| filter 含非法字符 | `filter 含不支持的字符：...` + 允许的字符集说明 |
+
+`filter` **走 `grep -E`，支持正则**：`"AndroidRuntime|FATAL|ANR"`、`"zygote|init"` 都可以。
+
+### `adb_install`
+
+| 情况 | 实际返回 |
 |---|---|
 | 成功 | `Success` |
 | 失败 | `Failure [INSTALL_FAILED_xxx: 原因]` |
-| 参数错（路径不存在） | `Failure [...]` 或 `没有可用连接` |
 
-常见失败码：
-- `INSTALL_FAILED_UPDATE_INCOMPATIBLE` — 签名不一致，需先卸载旧的
-- `INSTALL_FAILED_VERSION_DOWNGRADE` — 版本降级，需 `downgrade: true`
-- `INSTALL_FAILED_INSUFFICIENT_STORAGE` — 空间不足
+常见失败码：`INSTALL_FAILED_UPDATE_INCOMPATIBLE`（签名不一致）、`INSTALL_FAILED_VERSION_DOWNGRADE`（需 `downgrade: true`）、`INSTALL_FAILED_INSUFFICIENT_STORAGE`（空间不足）。
 
-### adb_logcat
+### `adb_screencap`
 
-返回日志文本尾部。`clear: true` 时先清空再抓。匹配不到返回空字符串。
+成功返回两行：
 
-### adb_screencap
+```
+截图已保存：/sdcard/dsh-ct.png
+-rw-rw---- 1 u0_a490 media_rw 1575442 2026-11-05 22:18 /sdcard/dsh-ct.png
+```
 
-| 情况 | 返回 |
-|---|---|
-| 成功 | `已保存：/sdcard/xxx.png`（带 localPath 时会加上"（拉回 <路径>）"） |
-| 失败 | `截图失败：<原始错误>` 或 `拉取失败：<错误>` |
+带 `localPath` 时多一行 `已拉到本地：/tmp/xxx.png`。失败返回 `截图失败：<原因>`。
 
-### adb_reconnect
+### `adb_reconnect`
 
-返回重建过程与结果。成功会包含 uid 2000 的验证行；失败会带具体原因。
+返回重建过程与结果，成功包含 uid 2000 的验证行。
+
+---
+
+## 九点五、危险命令拦截的边界（重要）
+
+**这是"防手滑"，不是安全边界。**
+
+能拦住（实测 9/9）：直接写法、引号拼接（`p""m uninstall`、`pm un"install"`、`cmd "package" uninstall`）、`find /sdcard -delete`、`su -c reboot`、`svc power reboot`、`rm -rf *`。
+
+**拦不住**：`$(echo cm0)` 这种动态拼接、alias、自己写脚本、`adb shell` 之外的路子。
+
+真要防住，得靠系统权限（不给 shell、用受限用户）。这个插件只是降低误触概率。
 
 ---
 
