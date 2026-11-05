@@ -351,7 +351,7 @@ logcat / dumpsys / getprop / settings
 screencap / input / cmd window / cmd notification
 ```
 
-⚠️ 其中 `cmd package` 的**写操作**（uninstall / clear / disable）属于拦截名单，要 `confirm: true`；读操作（`cmd package list packages` 等）不受限。
+⚠️ `cmd package` 的**写操作**（uninstall / clear / disable）**不在只读白名单**，要 `confirm: true`；读操作（`cmd package list packages` 等）直接放行。
 
 **关于 pull / push**：这六个工具里**没有**专门的 pull/push 工具。要传文件用 `adb_shell` 执行设备侧的 `cp`、`mkdir` 等；从 proot 往设备传文件，用插件外的 `adb push`（也就是在 proot 命令行里直接敲，不走插件工具）。这是文档早期版本的一个错误表述，已更正。
 
@@ -424,7 +424,7 @@ cat ~/.dsh/plugin-adb/state.json
 | 成功无输出 | `(无输出)` |
 | **超时** | `命令超时（2000ms 内没结束）。要更长时间就调大 timeoutMs。` + 命令原文 |
 | **退出码非 0** | `命令失败（退出码 1）` + 命令原文（如果 stderr 有内容，会附在 `[stderr]` 行后） |
-| 命中拦截名单 | `已拒绝：这条命令会改用户数据或卸载/停用应用。` + 命令原文 + 重试指引 |
+| 不在只读白名单（需确认） | `已拒绝：...` + 命令原文 + 重试指引 |
 | 连接失败 | `连不上，已试过端口：...` + 三步配对指引 |
 
 **怎么判断成功**：`text` 里含 `命令超时` / `命令失败` / `已拒绝` / `连不上` 就是失败。

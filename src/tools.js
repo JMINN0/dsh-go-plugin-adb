@@ -233,9 +233,10 @@ export async function shell(args) {
 
   if (isDangerous(cmd) && args?.confirm !== true) {
     return {
-      text: `已拒绝：这条命令会改用户数据或卸载/停用应用。\ncommand: ${cmd}\n\n` +
+      text: `已拒绝：这条命令不在只读白名单里（可能写数据、改设置、执行程序或卸载应用）。\ncommand: ${cmd}\n\n` +
         '确认要执行的话，先跟用户说清楚后果，再带 confirm:true 重试。\n' +
-        '卸载前请先用 aapt 读 APK 的真实中文名——包名不可信。',
+        '只读查询（ls / getprop / dumpsys / pm list / settings get 等）不需要确认。\n' +
+        '卸载应用前请先用 aapt 读 APK 的真实中文名——包名不可信。',
     };
   }
 
