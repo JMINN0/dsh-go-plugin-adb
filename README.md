@@ -46,9 +46,18 @@ Agent 连 `127.0.0.1:5555`，流量走回环网卡，所以：
 
 ## 三、前提条件
 
+**先说清三件事，不然后面每一步都会疑惑：**
+
+| 疑问 | 答案 |
+|---|---|
+| 这些命令在哪跑？ | 全部在**手机内部的 proot Ubuntu** 里跑（DSH Go 提供的终端）。不是电脑。 |
+| `192.168.1.100` 是谁的 IP？ | **手机自己的**局域网 IP。因为 adb 客户端和 adbd 在同一台设备上，所以配对时填手机上显示的那个 IP。 |
+| 从 GitHub 克隆下来要构建吗？ | **不用**。纯 ESM 的 JS，没有构建步骤、没有 `npm install`。`package.json` 里的 `peerDependencies` 是可选的，缺了插件会走内置回退。 |
+
 1. **一部 Android 手机**，开了开发者选项
 2. **无线调试可用**（用于一次性配对）
-3. **proot 环境能装 adb 客户端**：
+3. **首次配对时手机要连着 WiFi**——配对走局域网。配对成功之后就不需要了，关 WiFi 也能用（见第二节）
+4. **proot 环境能装 adb 客户端**：
 
 ```bash
 apt-get update && apt-get install -y android-tools-adb
@@ -87,6 +96,19 @@ dsh plugin --profile web add .
 dsh plugin --profile web add dsh-go-plugin-adb
 ```
 
+**该选哪个？** 这个包目前**没有发布到 npm registry**，只存在于 GitHub 仓库。所以：
+
+- 从 GitHub 来的人 → 用**方式 A**（clone + `add .`）
+- 报 `package not found` → 说明你用了方式 B，改回方式 A
+
+### 4.1.1 如果 `add` 失败的常见原因
+
+| 报错 | 原因 | 解法 |
+|---|---|---|
+| `package not found` / 找不到包 | 用了包名但没发布到 registry | 改用方式 A |
+| 找不到 `package.json` | 没 `cd` 进仓库目录 | `cd` 进去后 `add .` |
+| `ERR_MODULE_NOT_FOUND` | 目录不完整（比如只拷了部分文件） | 重新 clone |
+
 ### 4.2 `--profile web` 是什么意思
 
 DSH 可以有多套 profile（配置档）。手机本机引擎用的那套就叫 `web`。
@@ -94,7 +116,7 @@ DSH 可以有多套 profile（配置档）。手机本机引擎用的那套就�
 - 不加 `--profile` 会装到默认 profile，**手机 App 不会加载它**
 - 必须写 `--profile web`，工具才会出现在你的手机上
 
-如果你的环境只有一个 profile，可以先用 `dsh plugin --help` 看默认值。
+**如果你的环境只有一个 profile**：先用 `dsh plugin --help` 看默认值是不是 `web`。是就照写；不是就仍然写 `--profile web`——因为手机 App 引擎加载的就是 `web` 这一套，装到别处不会生效。
 
 ### 4.3 装完要重启引擎
 
@@ -121,6 +143,28 @@ grep -i "apply failed" ~/.dsh/dsh-app/diagnostics.md 2>/dev/null | grep adb || e
 ```
 
 两项都对、并且重启过引擎，工具才会出现。
+
+### 4.5 最后一关：真的调一次工具（这才叫装好了）
+
+**前面几步都只证明"配置对了"，证明不了"工具能用"。** 必须真调一次：
+
+在 DSH Go 的对话里直接说：
+
+```
+用 adb_devices 看看现在连着哪些设备
+```
+
+Agent 会调用 `adb_devices`，期望返回：
+
+```
+127.0.0.1:5555  device
+```
+
+**看到这行才算真的装好了。** 如果 Agent 说"没有这个工具"，回到 4.3 确认重启过引擎；如果返回 `没有可用连接`，回到第五节重新配对。
+
+> **工具怎么触发？** 这些工具是给 Agent 用的，不是给人敲的。你正常说话，Agent 自己决定调用哪个。你也可以直接点名："用 adb_shell 执行 getprop ro.product.model"。
+>
+> **工具列表在哪看？** 重启引擎后，DSH Go 的对话里 Agent 就能调用了。部分版本的界面上能看到可用工具清单，具体位置因版本而异——但只要能调成功，就不需要去界面上找。
 
 ---
 
@@ -353,7 +397,9 @@ screencap / input / cmd window / cmd notification
 | nubia NX809J | 三星、小米、Pixel 等其他厂商 adbd |
 | Linux proot | Windows / macOS 主机 |
 
-**端口自动协商**：插件按这个顺序尝试 `state.port`（上次成功的端口）→ 5555 → 6555 → 7555 → 8555 → 9555（避开模拟器占用的 5554–5585）。
+**端口自动协商**：插件按这个顺序尝试 `state.port`（上次成功的端口）→ 5555 → 6555 → 7555 → 8555 → 9555。
+
+候选里没有 5556、5557 这些紧邻的端口，是因为 **5554–5585 是 Android 模拟器的固定占用段**（这台设备上就有一个 `emulator-5554`），继续往上加会撞。所以第二个候选直接跳到 6555。这些端口由 adbd 在 `adb tcpip <port>` 时监听。
 
 端口记在哪：`~/.dsh/plugin-adb/state.json`，内容形如：
 
@@ -468,12 +514,28 @@ grep -i "apply failed" ~/.dsh/dsh-app/diagnostics.md | grep adb
 # 3. 重启引擎
 ```
 
-**`device not found`**
+**`device not found`** — 按顺序试，别跳步：
 
 ```bash
+# 1. 先直连
 adb connect 127.0.0.1:5555
-# 还是不行：手机重启过，需要重新 adb tcpip 5555
+adb devices
+
+# 2. 还不行 → 读插件记的端口，换那个再试
+cat ~/.dsh/plugin-adb/state.json
+adb connect 127.0.0.1:<state.json 里的 port>
+
+# 3. 还是不行 → 多半手机重启过，adbd 不在 5555 了。
+#    注意：这时直接跑 adb tcpip 5555 会失败（没有已连接设备），
+#    必须先重建无线调试连接：
+#      a) 手机：开发者选项 → 无线调试（重新打开）
+#      b) 记下「IP 地址和端口」（每次重开都会变）
+#      c) adb connect <那个 IP:端口>
+#      d) adb tcpip 5555
+#      e) adb connect 127.0.0.1:5555
 ```
+
+**为什么 `adb_reconnect` 救不了重启后的场景**：它内部也是"先有连接才能迁移端口"。手机重启后必须走上上面第 3 条的人工链。`adb_reconnect` 只适合"连接还在但不稳定"（forward 残留、socket 卡住）。
 
 **`unauthorized`**
 

@@ -38,6 +38,14 @@ Run `adb usb` or turn wireless debugging off to close it again.
 
 ## 3. Prerequisites
 
+**Three things worth settling first, or every later step will confuse you:**
+
+| Question | Answer |
+|---|---|
+| Where do these commands run? | Inside the **proot Ubuntu on the phone** (the terminal DSH Go provides). Not on a PC. |
+| Whose IP is `192.168.1.100`? | **The phone's own** LAN address. Client and adbd are on the same device, so use the IP the phone displays. |
+| Anything to build after cloning? | **No.** Plain ESM JS — no build step, no `npm install`. `peerDependencies` are optional; the plugin falls back internally. |
+
 1. An Android phone with Developer options enabled
 2. Wireless debugging available (for the one-time pairing)
 3. The proot environment can install the adb client:
@@ -68,11 +76,24 @@ dsh plugin --profile web add .
 
 The `.` means "the current directory". **You must be inside the repository directory**, or it reports that the package cannot be found.
 
-**Option B — a published package name** (if the package is published to an npm registry)
+**Option B — a published package name** (if published to an npm registry)
 
 ```bash
 dsh plugin --profile web add dsh-go-plugin-adb
 ```
+
+**Which one?** This package is **not published to npm** — it only lives in the GitHub repo. So:
+
+- coming from GitHub → use **Option A** (clone + `add .`)
+- got `package not found` → you used Option B; switch to Option A
+
+### 4.1.1 Common `add` failures
+
+| Error | Cause | Fix |
+|---|---|---|
+| `package not found` | used a name that is not published | use Option A |
+| no `package.json` found | not inside the repo directory | `cd` in, then `add .` |
+| `ERR_MODULE_NOT_FOUND` | incomplete directory (partial copy) | clone again |
 
 ### 4.2 What `--profile web` means
 
@@ -89,6 +110,8 @@ Installing only changes configuration; it does not reload code. **Restart the en
 
 Without the restart, no `adb_*` tools appear. This is the step people miss most often.
 
+**When are they usable?** The restart interrupts the engine for the current conversation. Once the app is accepting input again (a few to ~15 s), just talk in the **same** conversation — tools are registered globally, not per-conversation. If the agent still claims there are no tools, open a new conversation.
+
 ### 4.4 Verify the install
 
 ```bash
@@ -102,6 +125,28 @@ print([b for b in d['dsh']['profile']['bundles'] if 'adb' in b])"
 # 2. did the engine load it? (no 'apply failed' means good)
 grep -i "apply failed" ~/.dsh/dsh-app/diagnostics.md 2>/dev/null | grep adb || echo "no load errors ✅"
 ```
+
+### 4.5 The real last step: call a tool once
+
+Everything above only proves the configuration is right — not that the tools work. Make one real call:
+
+Say in the DSH Go conversation:
+
+```
+用 adb_devices 看看现在连着哪些设备
+```
+
+The agent calls `adb_devices` and should return:
+
+```
+127.0.0.1:5555  device
+```
+
+**Seeing that line is what "installed" means.** If the agent says the tool does not exist, go back to 4.3 and confirm the restart. If it returns `没有可用连接`, redo section 5.
+
+> **How are the tools triggered?** They are for the agent, not for you to type. You speak normally and the agent picks a tool, or you name it: "use adb_shell to run getprop ro.product.model".
+>
+> **Where is the tool list?** Once the engine restarts, the agent can call them. Some app versions show an inventory; the location varies by version — if a call works, you do not need to find the list.
 
 ---
 
@@ -307,7 +352,9 @@ screencap / input / cmd window / cmd notification
 | nubia NX809J | Samsung / Xiaomi / Pixel adbd |
 | Linux proot | Windows / macOS hosts |
 
-Port auto-negotiation order: `state.port` → 5555 → 6555 → 7555 → 8555 → 9555 (avoids the emulator range 5554–5585). The chosen port is stored in `~/.dsh/plugin-adb/state.json`:
+Port auto-negotiation order: `state.port` → 5555 → 6555 → 7555 → 8555 → 9555.
+
+There is no 5556/5557 in the list because **5554–5585 is the range Android emulators occupy** (this device already has an `emulator-5554`), so stepping up one by one would collide. The second candidate jumps straight to 6555. adbd listens on whichever port `adb tcpip <port>` was given. The chosen port is stored in `~/.dsh/plugin-adb/state.json`:
 
 ```json
 { "port": 5555, "lastOkAt": 1793871234567 }
@@ -365,7 +412,27 @@ grep -i "apply failed" ~/.dsh/dsh-app/diagnostics.md 2>/dev/null | grep adb
 
 If `diagnostics.md` does not exist, the engine has not written it yet — start the app once, or check the engine page in the app.
 
-**`device not found`** — run `adb connect 127.0.0.1:5555`. Still failing? The port record may be stale: read `~/.dsh/plugin-adb/state.json` to see which port the plugin last used, then `adb connect 127.0.0.1:<that port>`. If the phone rebooted, redo section 5.
+**`device not found`** — go in this order, do not skip:
+
+```bash
+# 1. try a direct connect
+adb connect 127.0.0.1:5555
+adb devices
+
+# 2. still failing -> read the recorded port and try that
+cat ~/.dsh/plugin-adb/state.json
+adb connect 127.0.0.1:<port from state.json>
+
+# 3. still failing -> the phone probably rebooted and adbd is no longer on 5555.
+#    Note: `adb tcpip 5555` will now FAIL (no connected device). Rebuild the link first:
+#      a) phone: Developer options -> Wireless debugging (turn it back on)
+#      b) note the "IP address & Port" (it changes every time)
+#      c) adb connect <that ip:port>
+#      d) adb tcpip 5555
+#      e) adb connect 127.0.0.1:5555
+```
+
+**Why `adb_reconnect` cannot rescue a reboot**: it also needs an existing connection before it can migrate the port. After a reboot you must take the manual path above. `adb_reconnect` suits cases where the link exists but is flaky (stale forward, stuck socket).
 
 **`unauthorized`** — the key is gone. Revoke USB debugging authorisations on the phone and repeat section 5.
 
