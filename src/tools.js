@@ -36,34 +36,55 @@ import * as adbConn from './adb.js';
 
 /** 按 shell 分隔符切段——**引号内的分隔符不算**（否则 echo "ls; reboot" 会被切断后误判）。 */
 /** 按 shell 分隔符切段：引号内的不算；heredoc 内容整段跳过（那是数据不是命令）。 */
-function splitSegments(cmd) {
-  const lines = String(cmd).split('\n');
-  const out = [];
-  let heredoc = null;
-  for (const line of lines) {
-    if (heredoc) {
-      if (line.trim() === heredoc) heredoc = null;
-      continue;
-    }
-    const m = line.match(/<<-?\s*["']?([A-Za-z_][A-Za-z0-9_]*)["']?/);
-    let cur = '';
-    let q = null;
-    for (let i = 0; i < line.length; i += 1) {
-      const ch = line[i];
-      if (q) { cur += ch; if (ch === q) q = null; continue; }
-      if (ch === '"' || ch === "'") { q = ch; cur += ch; continue; }
-      if (ch === ';' || ch === '|' || ch === '&' || ch === '(' || ch === ')') {
-        if ((ch === '|' || ch === '&') && line[i + 1] === ch) i += 1;
-        out.push(cur); cur = '';
-        continue;
-      }
-      cur += ch;
-    }
-    out.push(cur);
-    if (m) heredoc = m[1];
-  }
-  return out;
-}
+/**
+ * 危险命令判定：**允许名单（默认拒绝）**，不是拦截名单。
+ *
+ * 为什么换方向：前五轮用"危险写法拦截名单"，每轮都被找出新的绕过写法——
+ * setsid / $HOME / find -exec / sh -c -- / printf|sh / heredoc 当脚本 / rm -rf // 等等。
+ * shell 的写法是无穷的，枚举危险写法永远收敛不了（复核实测：11 类绕过能真的执行）。
+ *
+ * 现在的规则反过来了：只有**只读命令**直接放行，其余一律要求 confirm:true。
+ * 于是 `setsid pm uninstall` 之所以被拦，不是因为认出了 setsid，
+ * 而是因为 setsid 不在白名单里——**不需要枚举危险，就无法被绕过**。
+ *
+ * 代价：`am start` / `input tap` / `settings put` / `rm` 这类写操作都要带 confirm。
+ * 这是有意的摩擦：这个工具能执行任意 shell，写操作本来就该明确确认。
+ */
+
+/** 只读动词：不会改用户数据。 */
+const READONLY = new Set([
+  // 文件查看
+  'ls', 'll', 'la', 'cat', 'head', 'tail', 'wc', 'less', 'more', 'stat', 'file',
+  'readlink', 'realpath', 'pwd', 'tree', 'du', 'df', 'find', 'lsattr',
+  // 文本处理（纯过滤）
+  'grep', 'egrep', 'fgrep', 'rg', 'sort', 'uniq', 'cut', 'tr', 'awk', 'sed', 'wc',
+  'base64', 'md5sum', 'sha1sum', 'sha256sum', 'xxd', 'od', 'hexdump', 'strings',
+  // 输出
+  'echo', 'printf', 'true', 'false', 'sleep', 'clear', 'yes',
+  // 系统查询
+  'id', 'whoami', 'groups', 'uname', 'hostname', 'uptime', 'date', 'free', 'ps',
+  'top', 'pidof', 'pgrep', 'getprop', 'dumpsys', 'logcat', 'dmesg', 'mount',
+  'printenv', 'locale', 'getenforce', 'which', 'type', 'command', 'vmstat',
+  'netstat', 'ifconfig', 'ip', 'ss', 'wm', 'cmd', 'screencap',
+  // 下面两个在白名单里，但只允许查询子命令（见 SUBCOMMAND_RULES）
+  'pm', 'settings',
+]);
+
+/** 只读动词里，仍然需要逐个子命令判断的。 */
+const SUBCOMMAND_RULES = {
+  // pm 只允许查询类，uninstall/clear/disable 一律要确认
+  pm: /^(list|path|dump|query-|get-|resolve-activity|first-install-time|install-location)/,
+  // settings 只允许 get
+  settings: /^get/,
+  // cmd 只允许 package 的查询子命令和 window
+  cmd: /^(package\s+(list|path|dump|resolve)|window\s+(dump|size|density|displays)|overlay\s+list)/,
+  // find 不许 -delete / -exec / -ok
+  find: null,
+  // sed 不许 -i（原地改文件）
+  sed: null,
+  // logcat 的 -c 会清缓冲，属于破坏性
+  logcat: null,
+};
 
 /** 分词：按空白切，引号内空白不切；引号和反斜杠按 shell 规则处理。 */
 function tokenize(seg) {
@@ -88,81 +109,71 @@ function tokenize(seg) {
   return out;
 }
 
-/** 包装命令：剥掉它们之后才是真正要执行的东西。 */
-const WRAPPERS = new Set(['sudo', 'doas', 'busybox', 'toybox', 'env', 'exec', 'nohup', 'timeout',
-  'nice', 'ionice', 'sh', 'bash', 'zsh', 'dash', 'ash', 'su', 'xargs', 'command', 'builtin']);
-
-/** 会吃一个参数的选项。**不含** -i/-n/-l/-s（它们是 flag，当吃值选项会把命令吃掉）。 */
-const OPTS_WITH_VALUE = new Set(['-u', '-g', '-p', '-U', '-G', '-P', '-C', '-r', '-t', '-d', '-o', '-e', '-a']);
-const PM_ACTIONS = new Set(['uninstall', 'clear', 'disable', 'disable-user', 'uninstall-system-updates']);
-
-/** 受保护路径：rm -rf 打到这些地方就拦（早期只拦 `*`，`rm -rf /` 直接放过）。 */
-const PROTECTED = [
-  /^\/$/, /^\/\*$/, /^~\/*$/, /^\.\/\*$/, /^\*$/,
-  /^\/(sdcard|storage|data|system|root|vendor|etc|boot|dev|proc|sys|bin|sbin|lib|opt)(\/|$)/i,
-];
-const isProtectedPath = (p) => PROTECTED.some((re) => re.test(String(p)));
-
-function basename(tok) {
-  return String(tok || '').replace(/^.*\//, '').toLowerCase();
+/** 按 shell 分隔符切段（引号内不切）。 */
+function splitSegments(cmd) {
+  const out = [];
+  let cur = '';
+  let quote = null;
+  const text = String(cmd);
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) { cur += ch; if (ch === quote) quote = null; continue; }
+    if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
+    if (ch === ';' || ch === '|' || ch === '&' || ch === '(' || ch === ')' || ch === '\n') {
+      // `>&` / `&>` 是重定向，不是命令分隔符（`2>&1` 不该被切断）
+      if (ch === '&' && text[i - 1] === '>') { cur += ch; continue; }
+      if (ch === '&' && text[i + 1] === '>') { cur += ch; continue; }
+      if ((ch === '|' || ch === '&') && text[i + 1] === ch) i += 1;
+      out.push(cur); cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
 }
 
-/** 判断单个命令段是否危险。`sh -c "..."` 递归判断。 */
-function segmentDangerous(seg, depth = 0) {
-  if (depth > 4) return false;
+const basename = (tok) => String(tok || '').replace(/^.*\//, '').toLowerCase();
+
+/** 单个命令段是否需要确认（true = 需要确认）。 */
+function segmentNeedsConfirm(seg) {
   let toks = tokenize(seg);
   if (!toks.length) return false;
-
+  // 剥掉前置变量赋值 FOO=bar
   while (toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0])) toks.shift();
-
-  for (let guard = 0; guard < 10 && toks.length; guard += 1) {
-    const head = basename(toks[0]);
-    if (!WRAPPERS.has(head)) break;
-    const wrapper = head;
-    toks.shift();
-
-    // timeout 的第一个非选项参数是时长，不是命令
-    if (wrapper === 'timeout' && toks.length && /^\d+(\.\d+)?[smhd]?$/i.test(toks[0])) toks.shift();
-
-    while (toks.length && /^-/.test(toks[0])) {
-      const opt = toks.shift();
-      // 组合短选项里含 c（sh -lc / bash -ec）→ 后面那串是命令，重新切段判断
-      if (/^-[A-Za-z]*c[A-Za-z]*$/.test(opt) && toks.length) return isDangerous(toks[0]);
-      if (OPTS_WITH_VALUE.has(opt) && toks.length) toks.shift();
-    }
-    while (toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0])) toks.shift();
-  }
-
   if (!toks.length) return false;
+
   const verb = basename(toks[0]);
-  const args = toks.slice(1).map((t) => t.toLowerCase());
+  const rest = toks.slice(1);
+  const restLower = rest.map((t) => t.toLowerCase());
 
-  if (verb === 'pm' && args.length && PM_ACTIONS.has(args[0])) return true;
-  if (verb === 'cmd' && args[0] === 'package' && args[1] && PM_ACTIONS.has(args[1])) return true;
-  if (verb === 'reboot' || verb === 'recovery') return true;
-  if (verb === 'svc' && args.join(' ').includes('power reboot')) return true;
+  if (!READONLY.has(verb)) return true;      // 不在白名单 → 要确认（这是安全性的来源）
 
-  if (verb === 'rm') {
-    // 只认**递归**（含 r/R）才危险；`rm -f /sdcard/x.txt` 删单个文件是正常操作
-    const recursive = args.some((a) => /^-[a-z]*r/i.test(a));
-    if (recursive && args.some((a) => !/^-/.test(a) && isProtectedPath(a))) return true;
-    if (recursive && args.some((a) => a === '*' || a === '/*' || a === './*')) return true;
-  }
-  if (verb === 'find') {
-    const joined = args.join(' ');
-    if (args[0] && isProtectedPath(args[0]) && (joined.includes('-delete') || /-exec\s+rm/.test(joined))) return true;
-  }
-  if (verb === 'dd' && args.some((a) => /^of=\/dev\/(block|by-name)/.test(a))) return true;
+  // 白名单里的动词再按子命令细分
+  if (verb === 'pm') return !SUBCOMMAND_RULES.pm.test(restLower.join(' ').trim());
+  if (verb === 'settings') return !SUBCOMMAND_RULES.settings.test(restLower[0] || '');
+  if (verb === 'cmd') return !SUBCOMMAND_RULES.cmd.test(restLower.join(' ').trim());
+  if (verb === 'find') return restLower.some((a) => a === '-delete' || a === '-exec' || a === '-ok' || a.startsWith('-exec'));
+  if (verb === 'sed') return restLower.some((a) => a === '-i' || a.startsWith('-i'));
+  if (verb === 'logcat') return restLower.some((a) => a === '-c' || a === '--clear');
   return false;
 }
 
 /**
- * 判断一条命令是否命中危险拦截名单。导出给测试直接 import。
- * 定位是**防手滑，不是安全边界**：`$(...)` 动态拼接、alias、自写脚本都拦不住。
+ * 这条命令是否需要调用方显式确认。
+ * 导出给工具层和测试用。
  */
-export function isDangerous(cmd) {
-  return splitSegments(cmd).some((seg) => segmentDangerous(seg));
+export function needsConfirm(cmd) {
+  const text = String(cmd);
+  // 重定向 `>` / `>>` 会写文件，即使动词本身只读（echo x > /sdcard/f 就是写）。
+  // 注意排除 `2>&1`、`>/dev/null` 这类无害形态。
+  const writesFile = /(^|[^0-9&\]>])>>?(?!&)(?!\s*\/dev\/null)/.test(text);
+  if (writesFile) return true;
+  return text.split('\n').some((line) => splitSegments(line).some((seg) => segmentNeedsConfirm(seg)));
 }
+
+/** 兼容旧名（测试和外部调用可能还在用）。 */
+export const isDangerous = needsConfirm;
 
 
 /** 只允许这些字符进 shell：字母数字、下划线、点、斜杠、连字符、冒号、空格、= */

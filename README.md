@@ -10,7 +10,7 @@
 | 验证环境 | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | 工具数 | 6 |
 | 需要 root | **不需要** |
-| 稳定性 | 10/10 稳定性套件 + 77/77 危险命令拦截 |
+| 稳定性 | 10/10 稳定性套件 + 93/93 命令确认测试 |
 
 ---
 
@@ -255,23 +255,23 @@ adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 
 **返回值**：`{ text: "..." }`。命令无输出时返回 `(无输出)`；连接层面失败会返回 `连不上，已试过端口：...`。注意：命令本身跑失败（比如 grep 没匹配到）**不算**连接失败，`text` 里会有内容。
 
-**危险命令拦截名单**：下面这些必须显式传 `confirm: true`，否则直接拒绝执行（注意这是**拦截**名单，不是"白名单"——早期版本用错了术语）：
+**确认机制（允许名单，默认拒绝）**：只有只读命令直接执行，其余都要 `confirm: true`。
 
-- `pm uninstall <包>` / `pm uninstall -k <包>`
-- `pm clear <包>`
-- `pm disable <包>` / `pm disable-user <包>`
-- `pm enable` 以外的 `cmd package` 写操作（如 `cmd package uninstall`、`cmd package clear`）
-- `rm -rf /sdcard` 及其变体
-- `reboot` / `recovery`
-
-**`confirm` 的语义**：只有传 `true` 才放行；传 `false` 和不传**完全等价**（都会被拒）。拦截测试 77/77 通过，包括用引号绕过的变体：
+不传 `confirm: true` 时返回：
 
 ```
-pm "uninstall" com.foo.bar     ← 同样被拦
-pm uninstall 'com.foo.bar'     ← 同样被拦
+已拒绝：这条命令可能需要写数据或执行程序。command: <你的命令>
+
+确认要执行的话，先跟用户说清后果，再带 confirm:true 重试。
 ```
 
-**被拒之后怎么办**：先把后果跟用户说清楚，得到同意再带 `confirm: true` 重发。卸载应用前必须先用 aapt 读 APK 的真实中文名——包名不可信（这条是踩过事故的：`com.xiaoji.egggame.redmagic` 看着像游戏，实际是红魔用来跑 PC 游戏的「盖世游戏」组件）。
+**`confirm` 的语义**：只有 `true` 才放行；`false` 和不传**完全等价**（都会被拒）。确认测试 93/93 通过。
+
+**直接放行的只读命令**：`ls cat head tail grep find(无-delete) wc du df getprop dumpsys logcat(无-c) ps id uname pm list|path|dump cmd package list settings get echo printf sleep` 等。
+
+**需要确认的**：`pm uninstall|clear|disable`、任何 `rm`、`am start`、`input`、`settings put`、`sh/bash/sudo/env/timeout/nice/eval/setsid/xargs` 等包装命令、重定向写文件、以及**任何认不出的命令**。
+
+**被拒之后**：先把后果跟用户说清楚，得到同意再带 `confirm: true` 重发。卸载应用前必须先用 aapt 读 APK 的真实中文名——包名不可信（踩过事故：`com.xiaoji.egggame.redmagic` 看着像游戏，实际是红魔跑 PC 游戏的「盖世游戏」组件）。
 
 ### `adb_install`
 
@@ -479,15 +479,46 @@ adb devices:
 
 ---
 
-## 九点五、危险命令拦截的边界（重要）
+## 九点五、命令确认机制（允许名单，默认拒绝）
 
-**这是"防手滑"，不是安全边界。**
+**只有只读命令直接执行，其余一律要求 `confirm: true`。**
 
-能拦住（实测 77/77）：直接写法、引号拼接（`p""m uninstall`、`pm un"install"`、`cmd "package" uninstall`）、`find /sdcard -delete`、`su -c reboot`、`svc power reboot`、`rm -rf *`。
+这是**允许名单**，不是危险写法拦截名单。区别很重要：
 
-**拦不住**：`$(echo cm0)` 这种动态拼接、alias、自己写脚本、`adb shell` 之外的路子。
+| | 拦截名单（旧） | 允许名单（现在） |
+|---|---|---|
+| 判据 | 枚举危险写法 | 只放行认得的只读命令 |
+| 遇到没见过的写法 | ❌ 放行（危险） | ✅ 要确认（安全） |
+| `setsid pm uninstall` | 绕过 | 要确认（`setsid` 不在白名单） |
+| `find . -delete` | 绕过 | 要确认（`find` 带 `-delete`） |
 
-真要防住，得靠系统权限（不给 shell、用受限用户）。这个插件只是降低误触概率。
+**为什么换**：旧方案用正则枚举危险写法，五轮复核每轮都能找到新绕过（`setsid`、`$HOME`、`find -exec`、`sh -c --`、`printf | sh`、`rm -rf //`…）。shell 的写法是无穷的，枚举永远收敛不了。换成默认拒绝之后，**绕过在构造上不成立**——认不出的东西一律要确认。
+
+### 直接放行的（只读）
+
+```
+ls / cat / head / tail / grep / find(不带 -delete/-exec) / wc / du / df
+getprop / dumpsys / logcat(不带 -c) / ps / id / uname / date / free
+pm list / pm path / pm dump
+cmd package list|path|dump / cmd window
+settings get
+echo / printf / sleep
+```
+
+### 需要 `confirm: true` 的（其余全部）
+
+```
+pm uninstall / clear / disable
+rm（任何形态，包括删单个文件）
+am start / input tap / settings put
+sh / bash / sudo / env / timeout / nice / eval / setsid / xargs …
+重定向写文件（echo x > /sdcard/f）
+任何认不出的命令（curl / wget / 自定义脚本）
+```
+
+**代价**：写操作多一个参数。这是有意的摩擦——这个工具能执行任意 shell，写操作本来就该明确确认。
+
+**拦不住什么**：`$(...)` 动态拼接、alias、自写脚本、以及**调用方不加判断地无脑传 `confirm: true`**。最后这条最重要：`confirm` 的含义是"已经跟用户说过后果并得到同意"，不是"跳过检查"。
 
 ---
 

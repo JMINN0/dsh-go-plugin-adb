@@ -10,7 +10,7 @@ English ｜ [中文](README.md)
 | Verified on | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | Tools | 6 |
 | Root required | **No** |
-| Stability | 10/10 stability suite + 77/77 dangerous-command guard |
+| Stability | 10/10 stability suite + 93/93 confirmation tests |
 
 ---
 
@@ -237,7 +237,7 @@ adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 - `rm -rf /sdcard` and variants
 - `reboot` / `recovery`
 
-**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The guard passes 77/77 tests, including quote-based bypasses such as `pm "uninstall" com.foo.bar`.
+**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The confirmation suite passes 93/93. Note these are not "dangerous forms we recognise" but "not on the read-only allowlist, so confirmation is required".
 
 **After a refusal**: explain the consequence to the user, get consent, then resend with `confirm: true`. Before uninstalling anything, read the APK's real display name with aapt — package names lie.
 
@@ -419,15 +419,46 @@ Returns the rebuild steps and result, including a uid 2000 verification line on 
 
 ---
 
-## 9.5 Where the dangerous-command guard stops
+## 9.5 Command confirmation (allowlist, deny by default)
 
-**It prevents slips, it is not a security boundary.**
+**Only read-only commands run freely; everything else requires `confirm: true`.**
 
-Blocked (77/77 measured): direct forms, quote concatenation (`p""m uninstall`, `pm un"install"`, `cmd "package" uninstall`), `find /sdcard -delete`, `su -c reboot`, `svc power reboot`, `rm -rf *`.
+This is an **allowlist**, not a blocklist of dangerous patterns:
 
-**Not blocked**: dynamic construction like `$(echo cm0)`, aliases, your own scripts, anything outside `adb shell`.
+| | Blocklist (old) | Allowlist (now) |
+|---|---|---|
+| Criterion | enumerate dangerous forms | only known read-only commands pass |
+| A form nobody thought of | ❌ runs (unsafe) | ✅ requires confirmation |
+| `setsid pm uninstall` | bypassed | requires confirmation |
+| `find . -delete` | bypassed | requires confirmation |
 
-Real protection requires OS-level permissions. This guard only reduces accidental damage.
+**Why the change**: the blocklist approach was reviewed five times and every round produced new bypasses (`setsid`, `$HOME`, `find -exec`, `sh -c --`, `printf | sh`, `rm -rf //` …). Shell syntax is unbounded, so enumeration never converges. With deny-by-default, bypass is structurally impossible: anything unrecognised needs confirmation.
+
+### Runs freely (read-only)
+
+```
+ls / cat / head / tail / grep / find (without -delete/-exec) / wc / du / df
+getprop / dumpsys / logcat (without -c) / ps / id / uname / date / free
+pm list / pm path / pm dump
+cmd package list|path|dump / cmd window
+settings get
+echo / printf / sleep
+```
+
+### Requires `confirm: true` (everything else)
+
+```
+pm uninstall / clear / disable
+rm (any form, including a single file)
+am start / input tap / settings put
+sh / bash / sudo / env / timeout / nice / eval / setsid / xargs …
+redirection that writes a file (echo x > /sdcard/f)
+anything unrecognised (curl / wget / your own scripts)
+```
+
+**Cost**: one extra argument on write operations. That friction is intentional — this tool can run arbitrary shell.
+
+**What it cannot stop**: `$(...)` dynamic construction, aliases, your own scripts, and **a caller that blindly passes `confirm: true`**. The last one matters most: `confirm` means "the consequences were explained and agreed to", not "skip the check".
 
 ---
 
