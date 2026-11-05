@@ -94,7 +94,8 @@ export async function shell(args) {
   // 风险提示写在 README/STABILITY 里，不在代码里设卡——用户和 AI 要的是能力，不是沙箱。
   // 参数 confirm 保留在 schema 里只为向后兼容，当前不参与判断。
 
-  const timeout = Math.min(Math.max(Number(args?.timeoutMs) || 30000, 1000), 120000);
+  // 上限 600 秒：装大 APK、下载、编译这类命令经常超 2 分钟，120s 会把它们掐断
+  const timeout = Math.min(Math.max(Number(args?.timeoutMs) || 60000, 1000), 600000);
   const r = await adbConn.shellDetailed(cmd, { timeout });
   // withConn 的 ok=false 只代表「连接层面失败」；命令本身跑不通（比如 grep 没匹配）
   // 也是 ok=false，但输出里有内容。这两种不能混成一句话。
@@ -128,7 +129,7 @@ export async function install(args) {
 }
 
 export async function logcat(args) {
-  const lines = Math.min(Math.max(Number(args?.lines) || 200, 1), 5000);
+  const lines = Math.min(Math.max(Number(args?.lines) || 200, 1), 20000);
   const filter = args?.filter ? String(args.filter) : '';
 
   if (filter && !FILTER_CHARS.test(filter)) {

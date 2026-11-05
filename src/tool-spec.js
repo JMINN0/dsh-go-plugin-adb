@@ -65,7 +65,7 @@ export function shellSpec() {
       'settings put/get · rm/cp/mv · screencap/screenrecord · dumpsys/logcat/getprop · sh/busybox 脚本',
       '',
       '实际边界：',
-      '- 超时默认 30 秒，可传 timeoutMs（1000–120000）',
+      '- 超时默认 60 秒，可传 timeoutMs（1000–600000，最长 10 分钟）',
       '- 输出上限 32MB，超出返回失败但前面部分仍在',
       '- 输出按 UTF-8 解码，二进制内容会损坏',
       '- 没有 stdin，交互式命令用不了',
@@ -73,7 +73,7 @@ export function shellSpec() {
     ].join('\n'),
     parameters: {
       command: { type: 'string', required: true, description: '要执行的 shell 命令，可含管道、重定向、&&、$()。' },
-      timeoutMs: { type: 'integer', description: '超时毫秒，1000–120000，默认 30000。' },
+      timeoutMs: { type: 'integer', description: '超时毫秒，1000–600000，默认 60000。' },
     },
     output: out('命令的 stdout + stderr；失败时带退出码说明。'),
   };
@@ -110,7 +110,7 @@ export function logcatSpec() {
       '匹配不到不算错误，会明确告诉你"最近 N 行里没有匹配 …"。',
     ].join('\n'),
     parameters: {
-      lines: { type: 'integer', description: '取多少行，1–5000，默认 200。' },
+      lines: { type: 'integer', description: '取多少行，1–20000，默认 200。' },
       filter: { type: 'string', description: 'grep -E 正则表达式。省略则返回全部。' },
       clear: { type: 'boolean', description: '先执行 logcat -c 清空缓冲区再读。' },
     },
