@@ -255,21 +255,25 @@ adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 
 **返回值**：`{ text: "..." }`。命令无输出时返回 `(无输出)`；连接层面失败会返回 `连不上，已试过端口：...`。注意：命令本身跑失败（比如 grep 没匹配到）**不算**连接失败，`text` 里会有内容。
 
-**确认机制（允许名单，默认拒绝）**：只有只读命令直接执行，其余都要 `confirm: true`。
+**二次确认（只对不可逆操作）**：日常命令直接执行，只有这几种会要求 `confirm: true`：
+
+- `pm uninstall` / `pm clear` / `cmd package uninstall|clear`
+- `rm -rf` 打在 `/`、`/sdcard`、`/data`、`/system`、`/storage`、`~` 上
+- `reboot` / `recovery`
+- `dd of=/dev/block/...`、`mkfs`
 
 不传 `confirm: true` 时返回：
 
 ```
-已拒绝：这条命令可能需要写数据或执行程序。command: <你的命令>
+已拒绝：这条命令是不可逆操作（卸载/清空应用、删整盘、重启、写裸分区）。
+command: <你的命令>
 
-确认要执行的话，先跟用户说清后果，再带 confirm:true 重试。
+确认要执行的话，先跟用户说清楚后果，再带 confirm:true 重试。
 ```
 
-**`confirm` 的语义**：只有 `true` 才放行；`false` 和不传**完全等价**（都会被拒）。确认测试 48/48 通过。
+**这不是安全边界**：拿到 adb 权限的人本来就能做任何事，`confirm` 也是调用方自己填的布尔值。它只是防止模型误读指令，一下把数据删光。
 
-**直接放行的只读命令**：`ls cat head tail grep find(无-delete) wc du df getprop dumpsys logcat(无-c) ps id uname pm list|path|dump cmd package list settings get echo printf sleep` 等。
-
-**需要确认的**：`pm uninstall|clear|disable`、任何 `rm`、`am start`、`input`、`settings put`、`sh/bash/sudo/env/timeout/nice/eval/setsid/xargs` 等包装命令、重定向写文件、以及**任何认不出的命令**。
+**日常操作全部直接执行**：`am start`、`input tap`、`settings put`、`rm -f 单个文件`、`pm list`、`dumpsys`、`logcat`、`curl`、`sh -c "..."` 都不需要确认。
 
 **被拒之后**：先把后果跟用户说清楚，得到同意再带 `confirm: true` 重发。卸载应用前必须先用 aapt 读 APK 的真实中文名——包名不可信（踩过事故：`com.xiaoji.egggame.redmagic` 看着像游戏，实际是红魔跑 PC 游戏的「盖世游戏」组件）。
 
@@ -351,7 +355,7 @@ logcat / dumpsys / getprop / settings
 screencap / input / cmd window / cmd notification
 ```
 
-⚠️ `cmd package` 的**写操作**（uninstall / clear / disable）**不在只读白名单**，要 `confirm: true`；读操作（`cmd package list packages` 等）直接放行。
+⚠️ `cmd package` 的 **uninstall / clear** 是不可逆操作，要 `confirm: true`；其余（`cmd package list packages` 等）直接执行。
 
 **关于 pull / push**：这六个工具里**没有**专门的 pull/push 工具。要传文件用 `adb_shell` 执行设备侧的 `cp`、`mkdir` 等；从 proot 往设备传文件，用插件外的 `adb push`（也就是在 proot 命令行里直接敲，不走插件工具）。这是文档早期版本的一个错误表述，已更正。
 
@@ -424,7 +428,7 @@ cat ~/.dsh/plugin-adb/state.json
 | 成功无输出 | `(无输出)` |
 | **超时** | `命令超时（2000ms 内没结束）。要更长时间就调大 timeoutMs。` + 命令原文 |
 | **退出码非 0** | `命令失败（退出码 1）` + 命令原文（如果 stderr 有内容，会附在 `[stderr]` 行后） |
-| 不在只读白名单（需确认） | `已拒绝：...` + 命令原文 + 重试指引 |
+| 不可逆操作（需确认） | `已拒绝：这条命令是不可逆操作...` + 命令原文 + 重试指引 |
 | 连接失败 | `连不上，已试过端口：...` + 三步配对指引 |
 
 **怎么判断成功**：`text` 里含 `命令超时` / `命令失败` / `已拒绝` / `连不上` 就是失败。
