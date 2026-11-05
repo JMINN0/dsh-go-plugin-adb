@@ -46,9 +46,6 @@ import * as adbConn from './adb.js';
  * 结论都是"挡不住有心绕过，只增加摩擦"——removed。
  */
 
-/** 只允许这些字符进 shell：字母数字、下划线、点、斜杠、连字符、冒号、空格、= */
-const SAFE_TOKEN = /^[\w./:\-= ]+$/;
-
 /**
  * logcat 的 filter 是正则（走 grep -E），需要允许 `|` `(` `)` `[` `]` `*` `+` `?` `^` `$`。
  * 但直接放进 shell 有注入风险，所以：① 白名单限定字符集 ② 整体用单引号包裹 ③ 转义内部单引号。
@@ -59,14 +56,6 @@ const FILTER_CHARS = /^[\w./:=|()\[\]^$*+?\\ -]+$/;
 function quoteSingle(str) {
   // POSIX shell：把内部单引号变成 '\'' ，整体再包一层单引号
   return `'${String(str).replace(/'/g, `'\\''`)}'`;
-}
-
-function unsafeArg(name, value) {
-  const v = String(value ?? '');
-  if (!SAFE_TOKEN.test(v)) {
-    return `${name} 含不安全字符（只允许字母数字和 . / : - _ = 空格）：${JSON.stringify(v)}`;
-  }
-  return null;
 }
 
 const fmtDevices = (list) => (list?.length ? list.map((d) => `${d.serial}\t${d.state}`).join('\n') : '（没有任何设备）');
@@ -116,8 +105,8 @@ export async function shell(args) {
 export async function install(args) {
   const path = String(args?.path || '').trim();
   if (!path) return { text: '缺少 path' };
-  const bad = unsafeArg('path', path);
-  if (bad) return { text: bad };
+  // path 交给 execFile 的 argv，不经过 shell，没有命令注入面。
+  // 早期用 SAFE_TOKEN 限制成 ASCII，把中文路径（/sdcard/中转站/x.apk）全挡了，纯摩擦。
 
   const flags = ['install'];
   if (args?.reinstall !== false) flags.push('-r');
@@ -177,25 +166,22 @@ export async function logcat(args) {
 }
 
 export async function screencap(args) {
-  const remote = String(args?.outPath || '/sdcard/dsh-screencap.png').trim();
-  const bad = unsafeArg('outPath', remote);
-  if (bad) return { text: bad };
-
-  const local = String(args?.localPath || '').trim();
-  if (local) {
-    const badLocal = unsafeArg('localPath', local);
-    if (badLocal) return { text: badLocal };
-  }
-
-  const shot = await adbConn.withConn((target) => adb(['shell', `screencap -p ${remote}`], { target, timeout: 40000 }));
+  const remote = String(args?.outPath || '/sdcard/dsh-screencap.png');
+  // 路径要拼进 shell，用单引号包起来并转义内部单引号。
+  // 早期用 SAFE_TOKEN 限制字符集：中文路径被拒（/sdcard/中转站/x.png 写不了），
+  // 而带空格的路径反而放行、拼进命令后变成多个参数，报 "usage: screencap"（复核实测）。
+  const q = quoteSingle(remote);
+  const shot = await adbConn.withConn((target) => adb(['shell', `screencap -p ${q}`], { target, timeout: 40000 }));
   if (!shot.ok) return { text: `截图失败：${shot.text}` };
 
-  const ls = await adbConn.withConn((target) => adb(['shell', `ls -l ${remote}`], { target, timeout: 20000 }));
-  const lines = [`截图已保存：${remote}`, (ls.text || '').trim()].filter(Boolean);
+  const lines = [`截图已保存：${remote}`];
+  const ls = await adbConn.withConn((target) => adb(['shell', `ls -l ${q}`], { target, timeout: 10000 }));
+  if (ls.ok && ls.text) lines.push(ls.text.trim());
 
-  if (local) {
-    const p = await adbConn.withConn((target) => adb(['pull', remote, local], { target, timeout: 60000 }));
-    lines.push(p.ok ? `已拉到本地：${local}` : `拉取失败：${p.text}`);
+  const localPath = args?.localPath ? String(args.localPath) : '';
+  if (localPath) {
+    const pulled = await adbConn.adb(['pull', remote, localPath], { timeout: 60000 });
+    lines.push(pulled.ok ? `已拉到本地：${localPath}` : `拉取失败：${pulled.err}`);
   }
   return { text: lines.join('\n') };
 }

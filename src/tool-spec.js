@@ -42,15 +42,15 @@ export function reconnectSpec() {
   return {
     name: 'adb_reconnect',
     description: [
-      'Force a fresh adb connection: kill the local adb server, start it again, migrate a wireless-debug',
-      'port to loopback 5555 if needed, and verify the shell as uid 2000.',
-      CONNECT_NOTE,
+      '强制重建 adb 连接。手机重启、显示 offline、或 forward 残留时用。',
       '',
-      'Call this after a phone reboot or when adb_devices shows "offline" / no device.',
-      'It does NOT re-pair: if the adb key was revoked, the user must run pairing again.',
+      '做的事：adb start-server → 按候选端口序列重新探测 → 探测不到才 kill-server 重来 → 验证 uid 2000。',
+      '候选顺序：上次成功的端口 → 5555 → 6555 → 7555 → 8555 → 9555（跳过 5556–5585 模拟器段）。',
+      '',
+      '注意：手机重启后 adbd 不在 5555 时本工具救不回来——那种情况要手动重开无线调试拿新端口。',
     ].join('\n'),
     parameters: {},
-    output: out('What happened, ending with OK plus the device model, or the exact next step.'),
+    output: out('重建过程与结果，成功时含 uid 2000 验证行。'),
   };
 }
 
@@ -58,21 +58,24 @@ export function shellSpec() {
   return {
     name: 'adb_shell',
     description: [
-      'Run one shell command on this phone through adb (uid 2000).',
-      CONNECT_NOTE,
+      '在手机上执行 shell 命令（uid 2000）。没有拦截、没有白名单、没有二次确认——写什么就执行什么。',
       '',
-      'Works: pm list/path/install/uninstall, am start, logcat, dumpsys, screencap, input, ls of /sdcard.',
-      'Does NOT work: reading /data/data or /data/app (SELinux), run-as on non-debuggable packages, root.',
+      '这是最常用的工具，几乎能做 uid 2000 能做的任何事：',
+      'pm install/uninstall/list · am start/force-stop · input tap/text/swipe ·',
+      'settings put/get · rm/cp/mv · screencap/screenrecord · dumpsys/logcat/getprop · sh/busybox 脚本',
       '',
-      'Destructive commands (pm uninstall / pm clear / rm on user data) are refused unless confirm:true is',
-      'passed. Before uninstalling anything, resolve the package\'s real label with aapt — package names lie.',
+      '实际边界：',
+      '- 超时默认 30 秒，可传 timeoutMs（1000–120000）',
+      '- 输出上限 32MB，超出返回失败但前面部分仍在',
+      '- 输出按 UTF-8 解码，二进制内容会损坏',
+      '- 没有 stdin，交互式命令用不了',
+      '- 命令退出码非 0 不算工具失败，输出照常返回',
     ].join('\n'),
     parameters: {
-      command: { type: 'string', required: true, description: 'The shell command, e.g. "pm list packages | grep apex" or "dumpsys battery".' },
-      timeoutMs: { type: 'integer', description: 'Timeout in milliseconds, default 30000, max 120000.' },
-      confirm: { type: 'boolean', description: 'Set true only when the user approved a destructive command (uninstall/clear/rm of user data).' },
+      command: { type: 'string', required: true, description: '要执行的 shell 命令，可含管道、重定向、&&、$()。' },
+      timeoutMs: { type: 'integer', description: '超时毫秒，1000–120000，默认 30000。' },
     },
-    output: out('Command output, or the refusal / error with the reason.'),
+    output: out('命令的 stdout + stderr；失败时带退出码说明。'),
   };
 }
 
@@ -100,18 +103,18 @@ export function logcatSpec() {
   return {
     name: 'adb_logcat',
     description: [
-      'Read the tail of logcat without leaving a long-running process behind.',
-      CONNECT_NOTE,
+      '读 logcat 尾部（读多久由 lines 决定）。不会留长驻进程。',
       '',
-      'Filter is a plain substring or a logcat tag filter. Use it to catch crashes:',
-      'logcat({ filter: "FATAL|AndroidRuntime|DEBUG" }) right after a test.',
+      'filter 走 grep -E，**是真正则**：可以是 "FATAL"、"AndroidRuntime|ANR"、"(?i)exception"。',
+      '没有专门的 tag 过滤参数——按 tag 过滤就写正则，比如 "ActivityManager"。',
+      '匹配不到不算错误，会明确告诉你"最近 N 行里没有匹配 …"。',
     ].join('\n'),
     parameters: {
-      lines: { type: 'integer', description: 'How many trailing lines, default 200, max 5000.' },
-      filter: { type: 'string', description: 'Substring or tag filter applied with grep -E on the device.' },
-      clear: { type: 'boolean', description: 'Clear the buffer first, so you only see what happens next.' },
+      lines: { type: 'integer', description: '取多少行，1–5000，默认 200。' },
+      filter: { type: 'string', description: 'grep -E 正则表达式。省略则返回全部。' },
+      clear: { type: 'boolean', description: '先执行 logcat -c 清空缓冲区再读。' },
     },
-    output: out('The filtered log tail.'),
+    output: out('匹配到的日志行，或"没有匹配"的说明。'),
   };
 }
 

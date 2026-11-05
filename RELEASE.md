@@ -8,7 +8,7 @@
 
 - 6 个工具：`adb_devices` / `adb_shell` / `adb_install` / `adb_logcat` / `adb_screencap` / `adb_reconnect`
 - 手机内回环连接（`127.0.0.1:5555`），关 WiFi 也能用
-- 工具定义校验（`pm uninstall` / `rm -rf /sdcard` / `reboot` 等需显式 `confirm: true`）
+- 工具定义校验（用宿主 defineTool 编译 6 个工具定义，防"能加载但对话发送报错"）
 - 端口自动协商（5555 → 6555 → 7555 → 8555 → 9555）
 - 断线自愈（`kill-server` / `disconnect` 后自动重连）
 
@@ -34,5 +34,5 @@
 ### 已知边界
 
 - 只在 Android 16 + adb 34.0.4 + nubia NX809J 上验证
-- 工具定义校验是"防手滑"，不是安全边界（`$(...)` 动态拼接、alias、自写脚本可绕过；`p""m` 这类拼接已能拦）
+- 工具定义校验是"不是安全边界"，不是安全边界（`$(...)` 动态拼接、alias、自写脚本可绕过；`p""m` 这类拼接已能拦）
 - 无 root，读不了 `/data/data`

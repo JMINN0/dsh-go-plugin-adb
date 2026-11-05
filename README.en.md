@@ -210,36 +210,30 @@ adb_devices
 
 ### `adb_shell`
 
-Run a shell command. The most used one.
+Run a shell command. The most used tool. **No blocking, no allowlist, no confirmation.**
 
 | Parameter | Type | Required | Description |
 |---|---|---|---|
-| `command` | string | ✅ | command to run |
-| `timeoutMs` | integer | | timeout in ms, default 30000, max 120000 |
-| `confirm` | boolean | | dangerous commands require `true` |
-
-**Can the command use pipes and `&&`? Yes.** The whole string is handed to `adb shell`, so all of these are valid:
+| `command` | string | ✅ | the command; pipes, redirection, `&&`, `$()` all work |
+| `timeoutMs` | integer | | timeout in ms, 1000–120000, default 30000 |
 
 ```
+adb_shell { command: "getprop ro.build.version.release" }   → 16
 adb_shell { command: "pm list packages | grep tencent" }
-adb_shell { command: "getprop ro.product.model && getprop ro.build.version.release" }
 adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 ```
 
-**Return value**: `{ text: "..." }`. Returns `(无输出)` when the command produces nothing, and `连不上，已试过端口：...` when the connection layer fails. A failing command (e.g. grep with no match) is **not** a connection failure — `text` still contains output.
+**Real limits**:
 
-**Dangerous-command blocklist** — these are refused unless you pass `confirm: true`. This is a **blocklist**, not an allowlist:
+| Limit | Detail |
+|---|---|
+| timeout | 30 s default, 120 s maximum |
+| output size | 32 MB; over that the call fails but the first 32 MB is still returned |
+| encoding | decoded as UTF-8, so binary output (e.g. `cat` on an image) is corrupted |
+| stdin | not supported, so interactive tools (`top`, `vi`) do not work |
+| non-zero exit | **not a tool failure**; output is returned along with the exit code |
 
-- `pm uninstall <pkg>`
-- `pm clear <pkg>`
-- `pm disable <pkg>` / `pm disable-user <pkg>`
-- write operations under `cmd package` (e.g. `cmd package uninstall`)
-- `rm -rf /sdcard` and variants
-- `reboot` / `recovery`
-
-**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The confirmation suite passes 48/48. Note these are not "dangerous forms we recognise" but "not on the read-only allowlist, so confirmation is required".
-
-**After a refusal**: explain the consequence to the user, get consent, then resend with `confirm: true`. Before uninstalling anything, read the APK's real display name with aapt — package names lie.
+**Security notes are in section 9.5** — it can uninstall apps, wipe storage, reboot and change settings with no confirmation.
 
 ### `adb_install`
 
@@ -310,7 +304,7 @@ logcat / dumpsys / getprop / settings
 screencap / input / cmd window / cmd notification
 ```
 
-⚠️ write operations under `cmd package` (uninstall / clear / disable) are on the blocklist and need `confirm: true`; read operations such as `cmd package list packages` are not restricted.
+⚠️ `cmd package` uninstall / clear remove an app and its data; other subcommands (`list packages`) only query. Neither needs confirmation.
 
 **There is no dedicated pull/push tool** among the six. To move files around, use `adb_shell` with `cp` / `mkdir` on the device, or run `adb push` from the proot command line (outside the plugin).
 
@@ -450,7 +444,7 @@ sh / su / busybox / full shell syntax        run arbitrary scripts
 
 1. **Back up what matters.** There is no undo.
 2. **The model can misread instructions.** "Clean up the cache" and "delete the downloads folder" are different things.
-3. **Before uninstalling anything**, read the APK's real display name with aapt — package names lie. Real incident: `com.xiaoji.egggame.redmagic` looked like a game but was the vendor's PC-gaming launcher, and removing it broke a core feature.
+3. **Before uninstalling anything**, read the APK's real display name with aapt — package names lie. Real incident: `com.xiaoji.egggame.redmagic` looked like a game but was the vendor's PC-gaming launcher; removing it broke a core feature.
 4. **Do not hand this to an untrusted model or a third party.** This tool is a large share of control over the phone.
 
 ### Not possible (system limits, not permissions)
@@ -460,6 +454,7 @@ sh / su / busybox / full shell syntax        run arbitrary scripts
 | read `/data/data`, `/data/app` | SELinux blocks uid 2000 |
 | `run-as` on non-debuggable apps | system restriction |
 | anything requiring root | no root |
+| clipboard read | Android has no shell command for it |
 
 ---
 

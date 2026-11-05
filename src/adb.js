@@ -4,7 +4,7 @@
  * ## 为什么不是死板的 5555
  * `adb tcpip <port>` 会让 adbd 在那 个端口上监听；如果这个端口被别的进程占了，
  * 或者上次用过另一个端口，硬写 5555 就会一直连不上。所以策略是**候选列表 + 记住上次成功的**：
- * 依次试 state.port、5555、5556…5559，第一个能跑通 `shell id` 的就定下来并存盘。
+ * 依次试 state.port、5555、6555、7555、8555、9555，第一个能跑通 `shell id` 的就定下来并存盘。
  *
  * ## 怎么从"重启后 adbd 跑回随机端口"里自动恢复
  * Android 11+ 的无线调试会通过 mDNS 广播 `_adb-tls-connect._tcp`，端口就在里面。
@@ -54,11 +54,20 @@ export async function adb(args, { timeout = 25000, target = null, maxBuffer = 32
 export async function listDevices() {
   const r = await adb(['devices']);
   if (!r.ok) return { ok: false, err: r.err, list: [] };
-  // 过滤 emulator-*：adb 把 5554–5585 当模拟器段，connect 探测会凭空造出 emulator-55xx。
-  // 这台手机上不可能有真模拟器，留着只会干扰判断和迁移。
+  // 注意：不能过滤掉 emulator-*！
+  // adb 会把 5554–5585 这段当模拟器扫描区间，而我们的 adbd 恰好监听 5555，
+  // 于是同一台手机在 `adb devices` 里会出现两次：`127.0.0.1:5555` 和 `emulator-5554`。
+  // 早期版本把这些 emulator-* 全过滤掉，结果 adb_devices 永远显示"没有任何设备"，
+  // 而 findLiveTarget 依赖这个列表，会把活连接当成不存在（复核实测到的真 bug）。
+  //
+  // 现在的做法：全部保留，但把带冒号的网络串排前面（那才是我们真正用的地址）。
   const list = r.out.split('\n').slice(1).map((l) => l.trim()).filter(Boolean)
     .map((l) => { const [serial, st] = l.split(/\s+/); return { serial, state: st }; })
-    .filter((d) => !/^emulator-/.test(d.serial));
+    .sort((a, b) => {
+      const netA = a.serial.includes(':') ? 0 : 1;
+      const netB = b.serial.includes(':') ? 0 : 1;
+      return netA - netB;
+    });
   return { ok: true, list };
 }
 

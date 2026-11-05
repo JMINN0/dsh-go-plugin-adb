@@ -21,7 +21,7 @@ DSH Go 跑在手机上的 proot Ubuntu 里。这个插件让它能用 `adb` 命�
 - 装包、卸载包、看当前装了哪些包
 - 看 logcat
 - 执行任意 shell 命令（uid 2000）
-- 截图、拉文件、推文件
+- 截图、读系统状态
 - 查系统状态（电量、显示、窗口、进程）
 
 **它解决的问题**：以前要操作手机，得用电脑插数据线连 adb，或者用无障碍去点屏幕。这个插件让 Agent 直接在自己身体里开一个 shell。
@@ -215,7 +215,7 @@ adb -s 127.0.0.1:5555 shell id
 
 **配对成功后密钥存在 `~/.android/adbkey`**，以后不用再配对，包括重装 adb 之后。
 
-**手机重启后** `adb tcpip` 的设置会丢失，需要重新执行一次（插件里的 `adb_reconnect` 会尝试自动处理）。
+**手机重启后** `adb tcpip` 的设置会丢失，需要重新执行一次（插件里的 `adb_reconnect` 会尝试重建（重启后可能仍需手动重开无线调试））。
 
 ---
 
@@ -232,50 +232,31 @@ adb_devices
 
 ### `adb_shell`
 
-执行 shell 命令，这是最常用的一个。
+执行 shell 命令。最常用的一个。**没有拦截、没有白名单、没有二次确认。**
 
 | 参数 | 类型 | 必填 | 说明 |
 |---|---|---|---|
-| `command` | string | ✅ | 要执行的命令 |
-| `timeoutMs` | integer | | 超时毫秒，默认 30000，最大 120000 |
-| `confirm` | boolean | | 危险命令必须传 `true` 才执行 |
+| `command` | string | ✅ | 要执行的命令，可含管道、重定向、`&&`、`$()` |
+| `timeoutMs` | integer | | 超时毫秒，1000–120000，默认 30000 |
 
 ```
-adb_shell { command: "getprop ro.build.version.release" }
-→ 16
-```
-
-**命令里能用管道和 `&&` 吗？能。** 命令是整串交给 `adb shell` 执行的，所以这些都合法：
-
-```
+adb_shell { command: "getprop ro.build.version.release" }   → 16
 adb_shell { command: "pm list packages | grep tencent" }
-adb_shell { command: "getprop ro.product.model && getprop ro.build.version.release" }
 adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
+adb_shell { command: "echo 中文也可以" }
 ```
 
-**返回值**：`{ text: "..." }`。命令无输出时返回 `(无输出)`；连接层面失败会返回 `连不上，已试过端口：...`。注意：命令本身跑失败（比如 grep 没匹配到）**不算**连接失败，`text` 里会有内容。
+**实际边界**：
 
-**二次确认（只对不可逆操作）**：日常命令直接执行，只有这几种会要求 `confirm: true`：
+| 边界 | 说明 |
+|---|---|
+| 超时 | 默认 30 秒，最长 120 秒 |
+| 输出上限 | 32MB，超出返回失败但前 32MB 仍在 |
+| 编码 | 按 UTF-8 解码，二进制内容（直接 `cat` 图片）会损坏 |
+| stdin | 不支持，交互式命令（`top`、`vi`）用不了 |
+| 退出码非 0 | **不算工具失败**，输出照常返回，附带退出码说明 |
 
-- `pm uninstall` / `pm clear` / `cmd package uninstall|clear`
-- `rm -rf` 打在 `/`、`/sdcard`、`/data`、`/system`、`/storage`、`~` 上
-- `reboot` / `recovery`
-- `dd of=/dev/block/...`、`mkfs`
-
-不传 `confirm: true` 时返回：
-
-```
-已拒绝：这条命令是不可逆操作（卸载/清空应用、删整盘、重启、写裸分区）。
-command: <你的命令>
-
-确认要执行的话，先跟用户说清楚后果，再带 confirm:true 重试。
-```
-
-**这不是安全边界**：拿到 adb 权限的人本来就能做任何事，`confirm` 也是调用方自己填的布尔值。它只是防止模型误读指令，一下把数据删光。
-
-**日常操作全部直接执行**：`am start`、`input tap`、`settings put`、`rm -f 单个文件`、`pm list`、`dumpsys`、`logcat`、`curl`、`sh -c "..."` 都不需要确认。
-
-**被拒之后**：先把后果跟用户说清楚，得到同意再带 `confirm: true` 重发。卸载应用前必须先用 aapt 读 APK 的真实中文名——包名不可信（踩过事故：`com.xiaoji.egggame.redmagic` 看着像游戏，实际是红魔跑 PC 游戏的「盖世游戏」组件）。
+**安全提示见第九点五节**——它能卸包、删盘、重启、改设置，没有任何确认。
 
 ### `adb_install`
 
@@ -296,7 +277,7 @@ adb_install { path: "/sdcard/Download/app.apk" }
 
 **`reinstall: false` 且已装同包**：会安装失败（包已存在）。这种场景一般用默认的 `reinstall: true` 覆盖。
 
-**签名不一致**：失败。要么先卸载旧的（数据会丢，需用户同意后传 `confirm: true` 到 `adb_shell`），要么用同一密钥重新签名。
+**签名不一致**：失败。要么先用 `pm uninstall` 卸载旧的（数据会丢），要么用同一密钥重新签名。
 
 ### `adb_logcat`
 
@@ -355,7 +336,7 @@ logcat / dumpsys / getprop / settings
 screencap / input / cmd window / cmd notification
 ```
 
-⚠️ `cmd package` 的 **uninstall / clear** 是不可逆操作，要 `confirm: true`；其余（`cmd package list packages` 等）直接执行。
+⚠️ `cmd package` 的 uninstall / clear 会卸包清数据，其余子命令（`list packages` 等）只是查询。都不需要确认。
 
 **关于 pull / push**：这六个工具里**没有**专门的 pull/push 工具。要传文件用 `adb_shell` 执行设备侧的 `cp`、`mkdir` 等；从 proot 往设备传文件，用插件外的 `adb push`（也就是在 proot 命令行里直接敲，不走插件工具）。这是文档早期版本的一个错误表述，已更正。
 
@@ -428,10 +409,10 @@ cat ~/.dsh/plugin-adb/state.json
 | 成功无输出 | `(无输出)` |
 | **超时** | `命令超时（2000ms 内没结束）。要更长时间就调大 timeoutMs。` + 命令原文 |
 | **退出码非 0** | `命令失败（退出码 1）` + 命令原文（如果 stderr 有内容，会附在 `[stderr]` 行后） |
-| 不可逆操作（需确认） | `已拒绝：这条命令是不可逆操作...` + 命令原文 + 重试指引 |
+| 命令失败 | 输出 + 退出码说明 |
 | 连接失败 | `连不上，已试过端口：...` + 三步配对指引 |
 
-**怎么判断成功**：`text` 里含 `命令超时` / `命令失败` / `已拒绝` / `连不上` 就是失败。
+**怎么判断成功**：`text` 里含 `命令超时` / `命令失败` / `连不上` 就是失败。
 
 ### `adb_devices`
 
