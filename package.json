@@ -59,8 +59,8 @@
   },
   "homepage": "https://github.com/JMINN0/dsh-go-plugin-adb#readme",
   "scripts": {
-    "test": "node test/stability.mjs && node test/guard.mjs",
-    "test:stability": "node test/stability.mjs",
-    "test:guard": "node test/guard.mjs"
+    "test": "node test/contracts.mjs && node test/stability.mjs",
+    "test:contracts": "node test/contracts.mjs",
+    "test:stability": "node test/stability.mjs"
   }
 }

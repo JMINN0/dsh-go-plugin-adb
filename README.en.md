@@ -10,7 +10,7 @@ English ｜ [中文](README.md)
 | Verified on | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | Tools | 6 |
 | Root required | **No** |
-| Stability | 10/10 stability suite + 48/48 confirmation tests |
+| Tests | stability 10/10 · tool contracts 6/6 |
 
 ---
 
@@ -419,34 +419,49 @@ Returns the rebuild steps and result, including a uid 2000 verification line on 
 
 ---
 
-## 9.5 Command confirmation: a brake, not a security boundary
+## 9.5 Permissions and risk (read this first)
 
-**Everyday commands run freely. Only a few irreversible operations need `confirm: true`.**
+**This plugin does not block any command.** Its purpose is to give the phone more power, not to act as a sandbox.
 
-### Needs confirmation (only these)
+`adb_shell` runs anything uid 2000 can run on the device:
 
-| Operation | Why |
+```
+pm install / pm uninstall / pm clear         install, remove, wipe app data
+am start / am force-stop / am broadcast      launch and kill apps
+input tap / input text / input swipe         simulate touch and typing
+settings put / settings get                  change system settings
+rm / mv / cp / chmod                         read and write files
+screencap / screenrecord                     screenshots and screen recording
+dumpsys / logcat / getprop                   read system state
+sh / su / busybox / full shell syntax        run arbitrary scripts
+```
+
+**No confirmation prompts, no allowlist, no dangerous-command guard.**
+
+### What that means in practice
+
+- `pm uninstall <package>` removes an app and its data for good
+- `rm -rf /sdcard` wipes internal storage
+- `reboot` restarts the phone, interrupting whatever is running
+- a wrong `settings put` can change system behaviour
+- `input` can tap things while you are not looking
+
+### Before you use it
+
+1. **Back up what matters.** There is no undo.
+2. **The model can misread instructions.** "Clean up the cache" and "delete the downloads folder" are different things.
+3. **Before uninstalling anything**, read the APK's real display name with aapt — package names lie. Real incident: `com.xiaoji.egggame.redmagic` looked like a game but was the vendor's PC-gaming launcher, and removing it broke a core feature.
+4. **Do not hand this to an untrusted model or a third party.** This tool is a large share of control over the phone.
+
+### Not possible (system limits, not permissions)
+
+| Limit | Reason |
 |---|---|
-| `pm uninstall` / `pm clear` | removes or wipes an app, user data is gone |
-| `cmd package uninstall` / `clear` | same |
-| `rm -rf` against `/`, `/sdcard`, `/data`, `/system`, `/storage`, `~` | wipes a disk or system directory |
-| `reboot` / `recovery` | restarts, interrupting everything |
-| `dd of=/dev/block/...`, `mkfs` | writes raw partitions, formats |
+| read `/data/data`, `/data/app` | SELinux blocks uid 2000 |
+| `run-as` on non-debuggable apps | system restriction |
+| anything requiring root | no root |
 
-### Runs freely (everything else)
-
-```
-am start / am force-stop / input tap / settings put
-rm -f one file / rm -rf /tmp/build
-pm list / pm path / pm dump
-getprop / dumpsys / logcat / screencap / find / curl / sh -c "echo hi" …
-```
-
-**This is not a security boundary.** Anyone holding adb access can do anything anyway, and `confirm` is a boolean the caller sets itself — it cannot stop a deliberate action. Its only job is to stop the model from misreading one instruction and wiping data.
-
-Known bypasses: hiding the command inside quotes (`sh -c "pm uninstall x"`), `eval`, variable concatenation. **That is fine** — this is not meant to defend against people.
-
-**`confirm` means** "the consequences were explained and agreed to", not "skip the check".
+---
 
 ## 10. Uninstall and rollback
 

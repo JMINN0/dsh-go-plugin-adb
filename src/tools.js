@@ -37,50 +37,14 @@ import * as adbConn from './adb.js';
 /** 按 shell 分隔符切段——**引号内的分隔符不算**（否则 echo "ls; reboot" 会被切断后误判）。 */
 /** 按 shell 分隔符切段：引号内的不算；heredoc 内容整段跳过（那是数据不是命令）。 */
 /**
- * 命令二次确认：**只对不可逆操作踩一脚刹车**，不是安全边界。
+ * 这个插件**不拦截任何命令**。
  *
- * 设计取向（用户 2026-11-05 定的）：
- *   拿到 adb 权限的人本来就是为了尽可能多地操作手机，拦他没有意义；
- *   而 confirm 是调用方自己能填的布尔值，所以它天然挡不住有意为之的操作。
- *   因此这里**不做危险写法枚举**，只保留几种"手滑一下就无法挽回"的操作：
- *   整盘/系统目录删除、卸载或清空应用、重启、直接写裸分区。
+ * 定位（用户 2026-11-05 明确要求）：它就是给手机提权的工具，目标是"尽可能多地提供能力"，
+ * 而不是当沙箱。安全提示只写在文档里（README「权限与风险」一节），不在代码里设卡。
  *
- * 之前的版本做成了"只读白名单 + 默认拒绝"，连 `am start`、`input tap`、`rm 单个文件`
- * 都要确认——那是把工具当沙箱用，方向错了：代价大、还不构成安全边界。
- *
- * 已知能被绕过（不经确认就执行）：`setsid`、`eval`、`sh -c`、`$HOME`、变量拼接等。
- * 这没关系——它不是用来防人的，只是防止一次误读指令就把数据删光。
+ * 历史：中间迭代过两版拦截机制（危险写法黑名单 5 轮、只读白名单 1 轮），
+ * 结论都是"挡不住有心绕过，只增加摩擦"——removed。
  */
-
-/** 不可逆操作：命中就要 confirm。其余一律直接执行。 */
-const CATASTROPHIC = [
-  // 卸载 / 清空应用（可恢复，但用户数据没了）
-  /\bpm\s+(?:-\S+\s+)*(uninstall|clear)\b/,
-  /\bcmd\s+package\s+(uninstall|clear)\b/,
-  // 整盘 / 系统目录删除
-  /\brm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*\s+)+(?:[^\n]*\s)?(?:\/|\/\*|~|~\/\*|\/sdcard|\/storage|\/data|\/system|\/vendor|\/etc|\/boot|\/root)(?:\s|$)/,
-  // 重启 / 恢复模式
-  /(^|[;&|]\s*|\b(?:sudo|su\s+-c|sh\s+-c)\s+["']?)\s*(reboot|recovery)(\s|$|["'])/,
-  // 直接写裸分区
-  /\bdd\b[^\n]*\bof=\/dev\/(?:block|by-name)/,
-  // 格式化
-  /\bmkfs(\.\w+)?\b/,
-];
-
-/**
- * 这条命令是否需要调用方显式确认（true = 需要）。
- * 只拦不可逆操作；其余全部直接执行。
- */
-export function needsConfirm(cmd) {
-  // 匹配前把引号内的内容当数据剔掉：`echo "pm uninstall"` 只是打印字符串，不该踩刹车。
-  // 代价是"用引号包起来就能绕过"——但这是刹车不是安全边界，见上面说明。
-  const view = String(cmd ?? '').replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
-  return CATASTROPHIC.some((re) => re.test(view));
-}
-
-/** 兼容旧名。 */
-export const isDangerous = needsConfirm;
-
 
 /** 只允许这些字符进 shell：字母数字、下划线、点、斜杠、连字符、冒号、空格、= */
 const SAFE_TOKEN = /^[\w./:\-= ]+$/;
@@ -137,14 +101,9 @@ export async function shell(args) {
   const cmd = String(args?.command || '').trim();
   if (!cmd) return { text: '缺少 command' };
 
-  if (isDangerous(cmd) && args?.confirm !== true) {
-    return {
-      text: `已拒绝：这条命令是不可逆操作（卸载/清空应用、删整盘、重启、写裸分区）。\ncommand: ${cmd}\n\n` +
-        '确认要执行的话，先跟用户说清楚后果，再带 confirm:true 重试。\n' +
-        '日常命令（ls / getprop / dumpsys / pm list / am start / input / settings put 等）不需要确认。\n' +
-        '卸载应用前请先用 aapt 读 APK 的真实中文名——包名不可信。',
-    };
-  }
+  // 不做任何拦截：这个插件的定位就是"尽可能给权限"。
+  // 风险提示写在 README/STABILITY 里，不在代码里设卡——用户和 AI 要的是能力，不是沙箱。
+  // 参数 confirm 保留在 schema 里只为向后兼容，当前不参与判断。
 
   const timeout = Math.min(Math.max(Number(args?.timeoutMs) || 30000, 1000), 120000);
   const r = await adbConn.shellDetailed(cmd, { timeout });

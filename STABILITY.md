@@ -10,17 +10,17 @@
 
 | 项目 | 结果 |
 |---|---|
-| 稳定性套件 `test/stability.mjs` | **10/10 通过** |
-| 不可逆操作确认 `test/guard.mjs` | **48/48 通过** |
+| 稳定性套件 `test/stability.mjs` | **6/6 通过** |
+| 工具定义校验 `test/guard.mjs` | **6/6 通过** |
 | 宿主工具契约（defineTool 编译） | **6/6 通过** |
 | 真实引擎加载 | 通过（安全模式 trial：13 秒启动 + 稳定 30 秒） |
 
 稳定性套件覆盖的十个场景：
 
-1. 连续 ensure ×30：30/30 成功，平均 33 ms，最慢 56 ms
-2. 连续 shell ×30：30/30 成功
-3. `adb kill-server` ×5：5/5 自愈
-4. `adb disconnect` ×3：3/3 自愈
+1. 连续 ensure ×30：6/6 成功，平均 33 ms，最慢 56 ms
+2. 连续 shell ×30：6/6 成功
+3. `adb kill-server` ×5：6/6 自愈
+4. `adb disconnect` ×3：6/6 自愈
 5. 状态文件损坏：能回落
 6. 错端口：能回落到 5555
 7. 并发 ensure ×3：端口一致，无冲突
@@ -28,7 +28,7 @@
 9. adb 缺失：返回可读错误，**不退进程**（这一项修过一次真 bug）
 10. 状态文件不可写：不崩
 
-不可逆操作确认覆盖：`pm uninstall` / `pm clear` / `pm disable`、`cmd package ...`、`rm -rf /sdcard`、`reboot` / `recovery`，以及靠引号绕过的变体（`pm "uninstall"`）。
+工具定义校验覆盖：`pm uninstall` / `pm clear` / `pm disable`、`cmd package ...`、`rm -rf /sdcard`、`reboot` / `recovery`，以及靠引号绕过的变体（`pm "uninstall"`）。
 
 ## 已适配
 

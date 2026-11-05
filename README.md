@@ -10,7 +10,7 @@
 | 验证环境 | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | 工具数 | 6 |
 | 需要 root | **不需要** |
-| 稳定性 | 10/10 稳定性套件 + 48/48 命令确认测试 |
+| 测试 | 稳定性 10/10 · 工具定义 6/6 |
 
 ---
 
@@ -483,34 +483,49 @@ adb devices:
 
 ---
 
-## 九点五、命令确认：一道刹车，不是安全边界
+## 九点五、权限与风险（重要，请先读这段）
 
-**日常操作全部直接执行。只有几种"手滑一下就无法挽回"的操作需要 `confirm: true`。**
+**这个插件不拦截任何命令。** 它的定位就是给手机提权——尽可能多地提供能力，而不是当沙箱。
 
-### 需要确认的（只有这几类）
+`adb_shell` 能执行设备上 uid 2000 能执行的一切：
 
-| 操作 | 为什么 |
+```
+pm install / pm uninstall / pm clear         装包、卸包、清数据
+am start / am force-stop / am broadcast      起应用、杀应用
+input tap / input text / input swipe         模拟点击和输入
+settings put / settings get                  改系统设置
+rm / mv / cp / chmod                         读写文件
+screencap / screenrecord                     截图、录屏
+dumpsys / logcat / getprop                   读系统状态
+sh / su / busybox / 各种 shell 语法          执行任意脚本
+```
+
+**没有二次确认，没有白名单，没有危险命令拦截。**
+
+### 所以这些事它真的能做成
+
+- `pm uninstall <包名>` 把应用卸了，数据一起没
+- `rm -rf /sdcard` 把内部存储清空
+- `reboot` 重启手机，正在做的事全断
+- `settings put` 改错设置可能让系统行为异常
+- `input` 在你没注意的时候点了什么东西
+
+### 用之前请知道
+
+1. **备份重要数据**。这个工具没有撤销。
+2. **AI 也会误读指令**。说"清理一下缓存"和"删除下载目录"是两件事，它可能理解成后者。
+3. **卸载任何应用前**，先用 aapt 读 APK 的真实中文名——包名不可信。踩过事故：`com.xiaoji.egggame.redmagic` 看着像游戏，实际是红魔跑 PC 游戏的「盖世游戏」组件，卸了用户的核心功能就没了。
+4. **不要把它交给不可信的模型或第三方**。拿到这个工具等于拿到你手机的一大半控制权。
+
+### 做不到的事（不是权限问题，是系统限制）
+
+| 限制 | 原因 |
 |---|---|
-| `pm uninstall` / `pm clear` | 卸掉或清空应用，用户数据没了 |
-| `cmd package uninstall` / `clear` | 同上 |
-| `rm -rf` 打在 `/`、`/sdcard`、`/data`、`/system`、`/storage`、`~` 上 | 整盘或系统目录删除 |
-| `reboot` / `recovery` | 重启，正在做的事全中断 |
-| `dd of=/dev/block/...`、`mkfs` | 直接写裸分区、格式化 |
+| 读 `/data/data`、`/data/app` | SELinux 挡着 uid 2000 |
+| `run-as` 非 debuggable 应用 | 系统限制 |
+| 真正需要 root 的操作 | 没有 root |
 
-### 直接执行的（其余全部）
-
-```
-am start / am force-stop / input tap / settings put
-rm -f 单个文件 / rm -rf /tmp/build
-pm list / pm path / pm dump
-getprop / dumpsys / logcat / screencap / find / curl / sh -c "echo hi" …
-```
-
-**这不是安全边界。** 拿到 adb 权限的人本来就能做任何事；`confirm` 也是调用方自己填的布尔值，挡不住有意为之的操作。它的唯一作用是**防止模型误读指令，一下把数据删光**。
-
-已知能被绕过：把危险命令藏在引号里（`sh -c "pm uninstall x"`）、`eval`、变量拼接。**这没关系**——它不是用来防人的。
-
-**`confirm` 的语义**：不是"跳过检查"，是"已经跟用户说过后果并得到同意"。
+---
 
 ## 十、卸载与回滚
 
