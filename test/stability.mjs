@@ -129,7 +129,5 @@ async function timed(fn) { const s = Date.now(); const v = await fn(); return [v
 const dur = Date.now() - t0;
 const pass = results.filter((r) => r.ok).length;
 console.log(`\n合计 ${pass}/${results.length} 通过，用时 ${(dur / 1000).toFixed(1)}s`);
+await rm(TEST_STATE_DIR, { recursive: true, force: true }).catch(() => {});
 process.exit(pass === results.length ? 0 : 1);
-
-// 收尾：删掉临时状态目录，别在 /tmp 留垃圾
-try { await rm(TEST_STATE_DIR, { recursive: true, force: true }); } catch { /* ignore */ }

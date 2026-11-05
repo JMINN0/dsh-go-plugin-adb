@@ -21,12 +21,15 @@
   },
   "files": [
     "LICENSE",
+    "README.en.md",
     "README.md",
+    "RELEASE.md",
     "STABILITY.md",
     "bin",
     "cordis.patch.yml",
     "dsh.plugin.json",
-    "src"
+    "src",
+    "test"
   ],
   "bin": {
     "adbgo": "./bin/adbgo"
@@ -54,5 +57,10 @@
   "bugs": {
     "url": "https://github.com/JMINN0/dsh-go-plugin-adb/issues"
   },
-  "homepage": "https://github.com/JMINN0/dsh-go-plugin-adb#readme"
+  "homepage": "https://github.com/JMINN0/dsh-go-plugin-adb#readme",
+  "scripts": {
+    "test": "node test/stability.mjs && node test/guard.mjs",
+    "test:stability": "node test/stability.mjs",
+    "test:guard": "node test/guard.mjs"
+  }
 }

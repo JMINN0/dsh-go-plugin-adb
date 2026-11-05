@@ -30,6 +30,21 @@ const cases = [
   ['dumpsys diskstats', false], ['am start -n com.x/.Main', false],
   ['cat /proc/net/unix | grep devtools_remote', false],
   ['echo "device offline"', false],
+  // ---- 包装式命令（第三轮复核点名的新回归，必须拦）----
+  ['sh -c "pm uninstall x"', true], ['busybox sh -c "pm clear x"', true],
+  ["bash -c 'rm -rf /sdcard'", true], ['sudo sh -c "pm uninstall x"', true],
+  ['sudo -u shell pm uninstall x', true], ['env rm -rf /sdcard', true],
+  ['toybox rm -rf /sdcard', true], ['sudo reboot', true],
+  // ---- 端点形态 ----
+  ['(reboot)', true], ['reboot;', true], ['/system/bin/reboot', true],
+  ['dd if=/dev/zero of=/dev/block/by-name/boot', true],
+  // ---- 这些不能误伤（正文里提危险词，但不是执行它）----
+  ['echo "sudo reboot now"', false],
+  ['printf "use sudo reboot or nothing"', false],
+  ['grep -E "uninstall|clear" /sdcard/x', false],
+  ['cat /sdcard/notes.txt | grep reboot', false],
+  ['dumpsys activity | grep -i "rm -rf"', false],
+  ['echo "su -c reboot"', false],
 ];
 
 let bad = 0;

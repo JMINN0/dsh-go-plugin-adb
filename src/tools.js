@@ -20,51 +20,142 @@ import * as adbConn from './adb.js';
  *
  * 定位：**防手滑，不是安全边界**（拦不住 `$(echo cm0)` 动态拼接、alias、自写脚本）。
  *
- * 判据不是"剥掉引号再匹配"——那会误伤 `echo "rm -rf /sdcard"` 这类只是想打印字符串的命令，
- * 而误伤的后果比漏拦更糟：调用方会学着无脑带 confirm:true，拦截等于失效（上一轮实测误伤 8/13）。
+ * 实现方式是**分词判断**，不是正则拼接。原因：正则版前前后后修了三轮，
+ * 每修一次误伤就漏一批包装式命令（`sh -c "pm uninstall x"` 真的被执行过），
+ * 因为「命令段的开头」和「包装命令的参数」这两件事正则表达不清楚。
  *
- * 现在的判据是**按命令段锚定**：危险动词必须出现在一个命令段的**开头**（行首，或 ; & | && || 之后，
- * 或 sudo/su -c/sh -c/busybox 这类包装命令之后）。于是：
- *   `echo "rm -rf /sdcard"`      → rm 不在段首，放行 ✅
- *   `grep "pm uninstall" f.txt`  → pm 不在段首，放行 ✅
- *   `pm "uninstall" com.x`       → pm 在段首，拦住 ✅
- *   `p""m uninstall com.x`       → 词内引号用 p["']*m 容忍，拦住 ✅
- *   `cd /sdcard && rm -rf *`     → && 之后是段首，拦住 ✅
+ * 步骤：
+ *   1. 只剥词内引号（`p""m` → `pm`，`un"install"` → `uninstall`）。整段引号不剥，
+ *      否则 `echo "rm -rf /sdcard"` 会被误拦——误伤比漏拦更糟，调用方会学着无脑带 confirm。
+ *   2. 按 shell 分隔符切段：`;` `&` `|` `&&` `||` `(` `)` 换行。
+ *   3. 每段剥掉前置的变量赋值和包装命令（sudo / busybox / sh / bash / su / env / exec / timeout …），
+ *      以及它们的选项；遇到 `-c` 就把后面的参数当成**新命令**递归判断。
+ *   4. 看剩下的段首动词：pm uninstall/clear/disable、cmd package、rm 受保护目录、
+ *      find -delete、reboot/recovery、svc power reboot。
  */
-const SEG = String.raw`(?:^|[;&|]\s*|\b(?:sudo|doas|busybox|toybox|sh|bash)\s+(?:-c\s+)?)`;
 
-/**
- * 只剥"词内引号"：引号两侧都是字母数字才剥。
- *   `pm un"install"` → `pm uninstall`   （拦）
- *   `p""m uninstall` → `pm uninstall`   （拦）
- *   `echo "rm -rf /sdcard"` → 不变       （放行，引号两侧是空格）
- */
-const dequoteIntraWord = (cmd) => String(cmd).replace(/(\w)["']+(?=\w)/g, '$1');
-const DANGEROUS = [
-  // 包操作：词内允许引号（p["']*m 抓 p""m）
-  new RegExp(`${SEG}\\s*p["']*m\\s+["']?(uninstall|clear|disable)`, 'i'),
-  new RegExp(`${SEG}\\s*cmd\\s+["']?package["']?\\s+["']?(uninstall|clear|disable)`, 'i'),
-  // 删除受保护目录
-  new RegExp(`${SEG}\\s*rm\\s+(?:-\\S+\\s+)*["']?\\/(sdcard|storage|data)`, 'i'),
-  // 段首的 rm -rf *（配合 cd 进危险目录）
-  new RegExp(`${SEG}\\s*rm\\s+-\\S+\\s+\\*`, 'i'),
-  // find ... -delete
-  new RegExp(`${SEG}\\s*find\\s+\\/(sdcard|storage|data)[^|;]*\\s-delete`, 'i'),
-  // 重启类
-  new RegExp(`${SEG}\\s*(reboot|recovery)(\\s|$)`, 'i'),
-  new RegExp(`${SEG}\\s*su\\s+-c\\s+["']?\\s*(reboot|rm\\s|pm\\s+uninstall)`, 'i'),
-  new RegExp(`${SEG}\\s*svc\\s+power\\s+reboot`, 'i'),
-];
+/** 按 shell 分隔符切段——**引号内的分隔符不算**（否则 echo "ls; reboot" 会被切断后误判）。 */
+function splitSegments(cmd) {
+  const out = [];
+  let cur = '';
+  let quote = null;
+  const text = String(cmd);
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i];
+    if (quote) {
+      cur += ch;
+      if (ch === quote) quote = null;
+      continue;
+    }
+    if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
+    if (ch === ';' || ch === '|' || ch === '&' || ch === '(' || ch === ')' || ch === '\n') {
+      if (ch === '|' || ch === '&') {
+        // `||` / `&&` 一起吃掉
+        if (text[i + 1] === ch) i += 1;
+      }
+      out.push(cur); cur = '';
+      continue;
+    }
+    cur += ch;
+  }
+  out.push(cur);
+  return out;
+}
 
+/** 分词：按空白切，引号内的空白不切，引号本身去掉（得到"这个词实际是什么"）。 */
+function tokenize(seg) {
+  const out = [];
+  let cur = '';
+  let quote = null;
+  for (const ch of String(seg)) {
+    if (quote) {
+      if (ch === quote) quote = null; else cur += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (/\s/.test(ch)) {
+      if (cur) { out.push(cur); cur = ''; }
+    } else {
+      cur += ch;
+    }
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+/** 包装命令：剥掉它们之后才是真正要执行的东西。 */
+const WRAPPERS = new Set(['sudo', 'doas', 'busybox', 'toybox', 'env', 'exec', 'nohup', 'timeout',
+  'nice', 'ionice', 'sh', 'bash', 'zsh', 'dash', 'ash', 'su']);
+/** 会吃一个参数的选项（`sudo -u shell pm ...` 里的 -u shell）。 */
+const OPTS_WITH_VALUE = new Set(['-u', '-g', '-p', '-U', '-G', '-P', '-C', '-r', '-t', '-o', '-e', '-i', '-l', '-n', '-d', '-s']);
+const PM_ACTIONS = new Set(['uninstall', 'clear', 'disable', 'disable-user', 'uninstall-system-updates']);
+const PROTO_DIRS = /^\/(sdcard|storage|data)(\/|$)/i;
+
+function basename(tok) {
+  return String(tok || '').replace(/^.*\//, '').toLowerCase();
+}
+
+/** 判断单个命令段是否危险。递归处理 `sh -c "..."` 这种。 */
+function segmentDangerous(seg, depth = 0) {
+  if (depth > 4) return false;                       // 防止 `sh -c "sh -c ..."` 无限递归
+  let toks = tokenize(seg);
+  if (!toks.length) return false;
+
+  // 1) 剥前置变量赋值 FOO=bar
+  while (toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0])) toks.shift();
+
+  // 2) 剥包装命令与其选项
+  for (let guard = 0; guard < 8 && toks.length; guard += 1) {
+    const head = basename(toks[0]);
+    if (!WRAPPERS.has(head)) break;
+    toks.shift();
+    while (toks.length && /^-/.test(toks[0])) {
+      const opt = toks.shift();
+      // -c 后面那串是命令本身 → 递归
+      if (opt === '-c' && toks.length) {
+        return segmentDangerous(toks[0], depth + 1);
+      }
+      if (OPTS_WITH_VALUE.has(opt) && toks.length) toks.shift();
+    }
+    // 剥完选项后可能还是包装命令（sudo busybox rm ...），继续循环
+    while (toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0])) toks.shift();
+  }
+
+  if (!toks.length) return false;
+  const verb = basename(toks[0]);
+  const args = toks.slice(1).map((t) => t.toLowerCase());
+
+  // pm uninstall / clear / disable
+  if (verb === 'pm' && args.length && PM_ACTIONS.has(args[0])) return true;
+  // cmd package uninstall / clear / disable
+  if (verb === 'cmd' && args[0] === 'package' && args[1] && PM_ACTIONS.has(args[1])) return true;
+  // reboot / recovery（作为段首动词，带不带参数都算）
+  if (verb === 'reboot' || verb === 'recovery') return true;
+  // svc power reboot
+  if (verb === 'svc' && args.join(' ').includes('power reboot')) return true;
+  // rm 动受保护目录，或 rm -rf *
+  if (verb === 'rm') {
+    const hasRecursive = args.some((a) => /^-[a-z]*[rf]/i.test(a));
+    if (args.some((a) => PROTO_DIRS.test(a))) return true;
+    if (hasRecursive && args.some((a) => a === '*' || a === '/*')) return true;
+  }
+  // find 受保护目录 -delete / -exec rm
+  if (verb === 'find') {
+    const joined = args.join(' ');
+    if (PROTO_DIRS.test(args[0] || '') && (joined.includes('-delete') || /-exec\s+rm/.test(joined))) return true;
+  }
+  // dd 写裸设备
+  if (verb === 'dd' && args.some((a) => /^of=\/dev\/(block|by-name)/.test(a))) return true;
+  return false;
+}
 
 /**
  * 判断一条命令是否命中危险拦截名单。
- * 导出给测试用——测试直接 import 这个函数，不再从源码里抠字符串 eval
- * （之前那样做，模板字面量一变测试就崩，而且测的未必是线上路径）。
+ * 导出给测试直接 import（测试不该再从源码里 eval 抠正则——那种做法一改正则就崩）。
  */
 export function isDangerous(cmd) {
-  const view = dequoteIntraWord(String(cmd ?? ''));
-  return DANGEROUS.some((re) => re.test(view));
+  // 不做引号预处理：分词函数本身按 shell 规则处理引号
+  // （`pm un"install"` 会正确拼成 uninstall，`echo "rm -rf /sdcard"` 会保持成一个参数）。
+  return splitSegments(cmd).some((seg) => segmentDangerous(seg));
 }
 
 /** 只允许这些字符进 shell：字母数字、下划线、点、斜杠、连字符、冒号、空格、= */
@@ -171,6 +262,11 @@ export async function logcat(args) {
     return { text: `filter 含不支持的字符：${JSON.stringify(filter)}\n只允许字母数字、. / : = | ( ) [ ] ^ $ * + ? 空格和连字符（走 grep -E 正则）` };
   }
 
+  // clear 参数（以前只在 schema 里声明、实现里从不读，等于给模型撒谎）：先清空缓冲再抓
+  if (args?.clear === true) {
+    await adbConn.withConn((target) => adb(['shell', 'logcat -c'], { target, timeout: 10000 }));
+  }
+
   // 单引号包裹，防注入；grep -E 支持 | 等正则语法
   const grepPart = filter ? ` | grep -E ${quoteSingle(filter)}` : '';
   const cmd = `logcat -d -t ${lines}${grepPart}`;
@@ -178,15 +274,20 @@ export async function logcat(args) {
   // 但实测无匹配时会白跑两遍 + 一次全端口探测（3458ms、9 次 adb 调用）。
   const r = await adbConn.withConn((target) => adb(['shell', cmd], { target, timeout: 30000 }));
   const text = String(r ? r.text : '');
-  // 只有**明确的 grep 无匹配**才算正常结果；连接层失败不能被说成"没搜到"。
-  // 判据：文本里是 grep 的退出码 1（或纯空），且不含连接失败的特征词。
-  const looksLikeConnFailure = /连不上|没有可用连接|device offline|no devices|error: closed|protocol fault/i.test(text);
-  const grepNoMatch = (r && r.code === 1) || /退出码 1$/.test(text.trim());
-  if (grepNoMatch && !looksLikeConnFailure) {
+
+  // 判据用**结构化信号**（退出码 / 超时标记），不去扫日志正文——
+  // 之前用文本正则扫，日志里恰好出现 "error: closed" 的正常结果会被误报成连接故障。
+  if (r && r.timedOut) {
+    return { text: `读日志超时（${30000}ms）。日志很多时把 lines 调小一点再试。` };
+  }
+  // grep 无匹配 = 退出码 1（wrapped 的 "退出码 1" 文案也算）
+  const grepExit1 = (r && r.code === 1) || /退出码 1$/.test(text.trim());
+  if (grepExit1) {
     return { text: `（最近 ${lines} 行里没有匹配 ${JSON.stringify(filter || '*')} 的内容）` };
   }
-  if (looksLikeConnFailure) {
-    return { text: `读日志失败（连接问题，不是没匹配到）：${text}` };
+  // 剩下的失败都按连接/执行问题报，并把原始信息带出来
+  if (r && r.ok === false) {
+    return { text: `读日志失败：${text || '(无输出)'}` };
   }
   return { text: text.trim() || '(无输出)' };
 }
