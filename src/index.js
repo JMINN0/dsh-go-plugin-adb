@@ -31,15 +31,13 @@ export const inject = ['tools'];
  *
  * 所以按顺序试：裸包名 → 环境变量 → 常见引擎根目录 → 从进程参数往上找。
  */
-async function loadDefineTool(ctx) {
+async function loadDefineTool() {
   const tryImport = async (spec) => {
     const mod = await import(spec);
     return mod?.defineTool ? mod.defineTool : null;
   };
 
   // ① 宿主也许已经把 defineTool 递进来了，能不用解析就不用
-  const injected = ctx?.defineTool || ctx?.tools?.defineTool;
-  if (typeof injected === 'function') return injected;
 
   // ② 裸包名（正常情况下走这条）
   try {
@@ -100,28 +98,34 @@ async function loadDefineTool(ctx) {
 }
 
 export async function apply(ctx) {
+  // Cordis 规定：没通过 ctx.inject 声明依赖之前，**碰 ctx 的任何属性都会抛**
+  // （"cannot get property X without inject"）。所以所有 ctx 访问都放进 inject 回调里。
+  // 这个坑让三个插件在真实引擎里全部加载失败过，工具一个都没出现。
+  const disposers = [];
   try {
-    const defineTool = await loadDefineTool(ctx);
-    const defs = [
-      [devicesSpec, () => T.devices()],
-      [reconnectSpec, () => T.reconnect()],
-      [shellSpec, (args) => T.shell(args)],
-      [installSpec, (args) => T.install(args)],
-      [logcatSpec, (args) => T.logcat(args)],
-      [screencapSpec, (args) => T.screencap(args)],
-    ];
-    const disposers = defs.map(([spec, exec]) => ctx.tools.register(defineTool({ ...spec(), execute: exec })));
-    return () => {
-      for (const d of disposers) {
-        try {
-          d?.();
-        } catch {
-          /* 卸载失败不影响进程退出 */
-        }
-      }
-    };
+    ctx.inject(['tools'], (c) => {
+      loadDefineTool()
+        .then((defineTool) => {
+          const defs = [
+            [devicesSpec, () => T.devices()],
+            [reconnectSpec, () => T.reconnect()],
+            [shellSpec, (a) => T.shell(a)],
+            [installSpec, (a) => T.install(a)],
+            [logcatSpec, (a) => T.logcat(a)],
+            [screencapSpec, (a) => T.screencap(a)],
+          ];
+          for (const [spec, exec] of defs) {
+            try {
+              disposers.push(c.tools.register(defineTool({ ...spec(), execute: exec })));
+            } catch (e) {
+              console.error('[dsh-plugin-adb] register failed:', e?.message || e);
+            }
+          }
+        })
+        .catch((e) => console.error('[dsh-plugin-adb] apply failed, plugin disabled:', e?.message || e));
+    });
   } catch (e) {
-    console.error('[dsh-plugin-adb] apply failed, plugin disabled:', e?.message || e);
-    return () => {};
+    console.error('[dsh-plugin-adb] inject failed:', e?.message || e);
   }
+  return () => { for (const d of disposers) { try { d?.(); } catch {} } };
 }

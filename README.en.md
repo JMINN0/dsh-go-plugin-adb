@@ -1,9 +1,9 @@
-# dsh-plugin-adb
+# dsh-go-plugin-adb
 
 Give the agent a real adb shell **from inside the phone**. Not "PC controls phone" — the agent runs on the device and talks to its own adbd.
 
 ```bash
-dsh plugin --profile web add git+https://github.com/<you>/dsh-plugin-adb
+dsh plugin --profile web add git+https://github.com/<you>/dsh-go-plugin-adb
 ```
 
 ## Why it survives Wi-Fi being off

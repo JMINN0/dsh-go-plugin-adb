@@ -1,3 +1,3 @@
 - insert:
-    - id: dsh-plugin-adb
-      name: dsh-plugin-adb
+    - id: dsh-go-plugin-adb
+      name: dsh-go-plugin-adb

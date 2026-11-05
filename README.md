@@ -1,9 +1,9 @@
-# dsh-plugin-adb
+# dsh-go-plugin-adb
 
 在**手机内部**给 agent 开一个真实的 adb shell。不是"电脑连手机"，是"agent 住在这台手机里，连自己"。
 
 ```bash
-dsh plugin --profile web add dsh-plugin-adb
+dsh plugin --profile web add dsh-go-plugin-adb
 ```
 
 装完重启一次引擎，工具列表里会多出六个 `adb_*`。
