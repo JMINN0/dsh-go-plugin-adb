@@ -37,142 +37,48 @@ import * as adbConn from './adb.js';
 /** 按 shell 分隔符切段——**引号内的分隔符不算**（否则 echo "ls; reboot" 会被切断后误判）。 */
 /** 按 shell 分隔符切段：引号内的不算；heredoc 内容整段跳过（那是数据不是命令）。 */
 /**
- * 危险命令判定：**允许名单（默认拒绝）**，不是拦截名单。
+ * 命令二次确认：**只对不可逆操作踩一脚刹车**，不是安全边界。
  *
- * 为什么换方向：前五轮用"危险写法拦截名单"，每轮都被找出新的绕过写法——
- * setsid / $HOME / find -exec / sh -c -- / printf|sh / heredoc 当脚本 / rm -rf // 等等。
- * shell 的写法是无穷的，枚举危险写法永远收敛不了（复核实测：11 类绕过能真的执行）。
+ * 设计取向（用户 2026-11-05 定的）：
+ *   拿到 adb 权限的人本来就是为了尽可能多地操作手机，拦他没有意义；
+ *   而 confirm 是调用方自己能填的布尔值，所以它天然挡不住有意为之的操作。
+ *   因此这里**不做危险写法枚举**，只保留几种"手滑一下就无法挽回"的操作：
+ *   整盘/系统目录删除、卸载或清空应用、重启、直接写裸分区。
  *
- * 现在的规则反过来了：只有**只读命令**直接放行，其余一律要求 confirm:true。
- * 于是 `setsid pm uninstall` 之所以被拦，不是因为认出了 setsid，
- * 而是因为 setsid 不在白名单里——**不需要枚举危险，就无法被绕过**。
+ * 之前的版本做成了"只读白名单 + 默认拒绝"，连 `am start`、`input tap`、`rm 单个文件`
+ * 都要确认——那是把工具当沙箱用，方向错了：代价大、还不构成安全边界。
  *
- * 代价：`am start` / `input tap` / `settings put` / `rm` 这类写操作都要带 confirm。
- * 这是有意的摩擦：这个工具能执行任意 shell，写操作本来就该明确确认。
+ * 已知能被绕过（不经确认就执行）：`setsid`、`eval`、`sh -c`、`$HOME`、变量拼接等。
+ * 这没关系——它不是用来防人的，只是防止一次误读指令就把数据删光。
  */
 
-/** 只读动词：不会改用户数据。 */
-const READONLY = new Set([
-  // 文件查看
-  'ls', 'll', 'la', 'cat', 'head', 'tail', 'wc', 'less', 'more', 'stat', 'file',
-  'readlink', 'realpath', 'pwd', 'tree', 'du', 'df', 'find', 'lsattr',
-  // 文本处理（纯过滤）
-  'grep', 'egrep', 'fgrep', 'rg', 'sort', 'uniq', 'cut', 'tr', 'awk', 'sed', 'wc',
-  'base64', 'md5sum', 'sha1sum', 'sha256sum', 'xxd', 'od', 'hexdump', 'strings',
-  // 输出
-  'echo', 'printf', 'true', 'false', 'sleep', 'clear', 'yes',
-  // 系统查询
-  'id', 'whoami', 'groups', 'uname', 'hostname', 'uptime', 'date', 'free', 'ps',
-  'top', 'pidof', 'pgrep', 'getprop', 'dumpsys', 'logcat', 'dmesg', 'mount',
-  'printenv', 'locale', 'getenforce', 'which', 'type', 'command', 'vmstat',
-  'netstat', 'ifconfig', 'ip', 'ss', 'wm', 'cmd', 'screencap',
-  // 下面两个在白名单里，但只允许查询子命令（见 SUBCOMMAND_RULES）
-  'pm', 'settings',
-]);
-
-/** 只读动词里，仍然需要逐个子命令判断的。 */
-const SUBCOMMAND_RULES = {
-  // pm 只允许查询类，uninstall/clear/disable 一律要确认
-  pm: /^(list|path|dump|query-|get-|resolve-activity|first-install-time|install-location)/,
-  // settings 只允许 get
-  settings: /^get/,
-  // cmd 只允许 package 的查询子命令和 window
-  cmd: /^(package\s+(list|path|dump|resolve)|window\s+(dump|size|density|displays)|overlay\s+list)/,
-  // find 不许 -delete / -exec / -ok
-  find: null,
-  // sed 不许 -i（原地改文件）
-  sed: null,
-  // logcat 的 -c 会清缓冲，属于破坏性
-  logcat: null,
-};
-
-/** 分词：按空白切，引号内空白不切；引号和反斜杠按 shell 规则处理。 */
-function tokenize(seg) {
-  const out = [];
-  let cur = '';
-  let quote = null;
-  let has = false;
-  const text = String(seg);
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    if (quote) {
-      if (ch === quote) quote = null; else cur += ch;
-      has = true;
-      continue;
-    }
-    if (ch === '"' || ch === "'") { quote = ch; has = true; continue; }
-    if (ch === '\\' && i + 1 < text.length) { cur += text[i + 1]; i += 1; has = true; continue; }
-    if (/\s/.test(ch)) { if (has) { out.push(cur); cur = ''; has = false; } continue; }
-    cur += ch; has = true;
-  }
-  if (has) out.push(cur);
-  return out;
-}
-
-/** 按 shell 分隔符切段（引号内不切）。 */
-function splitSegments(cmd) {
-  const out = [];
-  let cur = '';
-  let quote = null;
-  const text = String(cmd);
-  for (let i = 0; i < text.length; i += 1) {
-    const ch = text[i];
-    if (quote) { cur += ch; if (ch === quote) quote = null; continue; }
-    if (ch === '"' || ch === "'") { quote = ch; cur += ch; continue; }
-    if (ch === ';' || ch === '|' || ch === '&' || ch === '(' || ch === ')' || ch === '\n') {
-      // `>&` / `&>` 是重定向，不是命令分隔符（`2>&1` 不该被切断）
-      if (ch === '&' && text[i - 1] === '>') { cur += ch; continue; }
-      if (ch === '&' && text[i + 1] === '>') { cur += ch; continue; }
-      if ((ch === '|' || ch === '&') && text[i + 1] === ch) i += 1;
-      out.push(cur); cur = '';
-      continue;
-    }
-    cur += ch;
-  }
-  out.push(cur);
-  return out;
-}
-
-const basename = (tok) => String(tok || '').replace(/^.*\//, '').toLowerCase();
-
-/** 单个命令段是否需要确认（true = 需要确认）。 */
-function segmentNeedsConfirm(seg) {
-  let toks = tokenize(seg);
-  if (!toks.length) return false;
-  // 剥掉前置变量赋值 FOO=bar
-  while (toks.length && /^[A-Za-z_][A-Za-z0-9_]*=/.test(toks[0])) toks.shift();
-  if (!toks.length) return false;
-
-  const verb = basename(toks[0]);
-  const rest = toks.slice(1);
-  const restLower = rest.map((t) => t.toLowerCase());
-
-  if (!READONLY.has(verb)) return true;      // 不在白名单 → 要确认（这是安全性的来源）
-
-  // 白名单里的动词再按子命令细分
-  if (verb === 'pm') return !SUBCOMMAND_RULES.pm.test(restLower.join(' ').trim());
-  if (verb === 'settings') return !SUBCOMMAND_RULES.settings.test(restLower[0] || '');
-  if (verb === 'cmd') return !SUBCOMMAND_RULES.cmd.test(restLower.join(' ').trim());
-  if (verb === 'find') return restLower.some((a) => a === '-delete' || a === '-exec' || a === '-ok' || a.startsWith('-exec'));
-  if (verb === 'sed') return restLower.some((a) => a === '-i' || a.startsWith('-i'));
-  if (verb === 'logcat') return restLower.some((a) => a === '-c' || a === '--clear');
-  return false;
-}
+/** 不可逆操作：命中就要 confirm。其余一律直接执行。 */
+const CATASTROPHIC = [
+  // 卸载 / 清空应用（可恢复，但用户数据没了）
+  /\bpm\s+(?:-\S+\s+)*(uninstall|clear)\b/,
+  /\bcmd\s+package\s+(uninstall|clear)\b/,
+  // 整盘 / 系统目录删除
+  /\brm\s+(?:-[a-zA-Z]*[rR][a-zA-Z]*\s+)+(?:[^\n]*\s)?(?:\/|\/\*|~|~\/\*|\/sdcard|\/storage|\/data|\/system|\/vendor|\/etc|\/boot|\/root)(?:\s|$)/,
+  // 重启 / 恢复模式
+  /(^|[;&|]\s*|\b(?:sudo|su\s+-c|sh\s+-c)\s+["']?)\s*(reboot|recovery)(\s|$|["'])/,
+  // 直接写裸分区
+  /\bdd\b[^\n]*\bof=\/dev\/(?:block|by-name)/,
+  // 格式化
+  /\bmkfs(\.\w+)?\b/,
+];
 
 /**
- * 这条命令是否需要调用方显式确认。
- * 导出给工具层和测试用。
+ * 这条命令是否需要调用方显式确认（true = 需要）。
+ * 只拦不可逆操作；其余全部直接执行。
  */
 export function needsConfirm(cmd) {
-  const text = String(cmd);
-  // 重定向 `>` / `>>` 会写文件，即使动词本身只读（echo x > /sdcard/f 就是写）。
-  // 注意排除 `2>&1`、`>/dev/null` 这类无害形态。
-  const writesFile = /(^|[^0-9&\]>])>>?(?!&)(?!\s*\/dev\/null)/.test(text);
-  if (writesFile) return true;
-  return text.split('\n').some((line) => splitSegments(line).some((seg) => segmentNeedsConfirm(seg)));
+  // 匹配前把引号内的内容当数据剔掉：`echo "pm uninstall"` 只是打印字符串，不该踩刹车。
+  // 代价是"用引号包起来就能绕过"——但这是刹车不是安全边界，见上面说明。
+  const view = String(cmd ?? '').replace(/"[^"]*"/g, '""').replace(/'[^']*'/g, "''");
+  return CATASTROPHIC.some((re) => re.test(view));
 }
 
-/** 兼容旧名（测试和外部调用可能还在用）。 */
+/** 兼容旧名。 */
 export const isDangerous = needsConfirm;
 
 

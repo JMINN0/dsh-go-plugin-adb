@@ -10,7 +10,7 @@ English ｜ [中文](README.md)
 | Verified on | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | Tools | 6 |
 | Root required | **No** |
-| Stability | 10/10 stability suite + 93/93 confirmation tests |
+| Stability | 10/10 stability suite + 48/48 confirmation tests |
 
 ---
 
@@ -237,7 +237,7 @@ adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 - `rm -rf /sdcard` and variants
 - `reboot` / `recovery`
 
-**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The confirmation suite passes 93/93. Note these are not "dangerous forms we recognise" but "not on the read-only allowlist, so confirmation is required".
+**`confirm` semantics**: only `true` lets it through. `false` and omitting it are **equivalent** (both refused). The confirmation suite passes 48/48. Note these are not "dangerous forms we recognise" but "not on the read-only allowlist, so confirmation is required".
 
 **After a refusal**: explain the consequence to the user, get consent, then resend with `confirm: true`. Before uninstalling anything, read the APK's real display name with aapt — package names lie.
 
@@ -419,48 +419,34 @@ Returns the rebuild steps and result, including a uid 2000 verification line on 
 
 ---
 
-## 9.5 Command confirmation (allowlist, deny by default)
+## 9.5 Command confirmation: a brake, not a security boundary
 
-**Only read-only commands run freely; everything else requires `confirm: true`.**
+**Everyday commands run freely. Only a few irreversible operations need `confirm: true`.**
 
-This is an **allowlist**, not a blocklist of dangerous patterns:
+### Needs confirmation (only these)
 
-| | Blocklist (old) | Allowlist (now) |
-|---|---|---|
-| Criterion | enumerate dangerous forms | only known read-only commands pass |
-| A form nobody thought of | ❌ runs (unsafe) | ✅ requires confirmation |
-| `setsid pm uninstall` | bypassed | requires confirmation |
-| `find . -delete` | bypassed | requires confirmation |
+| Operation | Why |
+|---|---|
+| `pm uninstall` / `pm clear` | removes or wipes an app, user data is gone |
+| `cmd package uninstall` / `clear` | same |
+| `rm -rf` against `/`, `/sdcard`, `/data`, `/system`, `/storage`, `~` | wipes a disk or system directory |
+| `reboot` / `recovery` | restarts, interrupting everything |
+| `dd of=/dev/block/...`, `mkfs` | writes raw partitions, formats |
 
-**Why the change**: the blocklist approach was reviewed five times and every round produced new bypasses (`setsid`, `$HOME`, `find -exec`, `sh -c --`, `printf | sh`, `rm -rf //` …). Shell syntax is unbounded, so enumeration never converges. With deny-by-default, bypass is structurally impossible: anything unrecognised needs confirmation.
-
-### Runs freely (read-only)
+### Runs freely (everything else)
 
 ```
-ls / cat / head / tail / grep / find (without -delete/-exec) / wc / du / df
-getprop / dumpsys / logcat (without -c) / ps / id / uname / date / free
+am start / am force-stop / input tap / settings put
+rm -f one file / rm -rf /tmp/build
 pm list / pm path / pm dump
-cmd package list|path|dump / cmd window
-settings get
-echo / printf / sleep
+getprop / dumpsys / logcat / screencap / find / curl / sh -c "echo hi" …
 ```
 
-### Requires `confirm: true` (everything else)
+**This is not a security boundary.** Anyone holding adb access can do anything anyway, and `confirm` is a boolean the caller sets itself — it cannot stop a deliberate action. Its only job is to stop the model from misreading one instruction and wiping data.
 
-```
-pm uninstall / clear / disable
-rm (any form, including a single file)
-am start / input tap / settings put
-sh / bash / sudo / env / timeout / nice / eval / setsid / xargs …
-redirection that writes a file (echo x > /sdcard/f)
-anything unrecognised (curl / wget / your own scripts)
-```
+Known bypasses: hiding the command inside quotes (`sh -c "pm uninstall x"`), `eval`, variable concatenation. **That is fine** — this is not meant to defend against people.
 
-**Cost**: one extra argument on write operations. That friction is intentional — this tool can run arbitrary shell.
-
-**What it cannot stop**: `$(...)` dynamic construction, aliases, your own scripts, and **a caller that blindly passes `confirm: true`**. The last one matters most: `confirm` means "the consequences were explained and agreed to", not "skip the check".
-
----
+**`confirm` means** "the consequences were explained and agreed to", not "skip the check".
 
 ## 10. Uninstall and rollback
 

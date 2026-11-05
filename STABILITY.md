@@ -11,7 +11,7 @@
 | 项目 | 结果 |
 |---|---|
 | 稳定性套件 `test/stability.mjs` | **10/10 通过** |
-| 命令确认机制 `test/guard.mjs` | **93/93 通过** |
+| 不可逆操作确认 `test/guard.mjs` | **48/48 通过** |
 | 宿主工具契约（defineTool 编译） | **6/6 通过** |
 | 真实引擎加载 | 通过（安全模式 trial：13 秒启动 + 稳定 30 秒） |
 
@@ -28,7 +28,7 @@
 9. adb 缺失：返回可读错误，**不退进程**（这一项修过一次真 bug）
 10. 状态文件不可写：不崩
 
-命令确认机制覆盖：`pm uninstall` / `pm clear` / `pm disable`、`cmd package ...`、`rm -rf /sdcard`、`reboot` / `recovery`，以及靠引号绕过的变体（`pm "uninstall"`）。
+不可逆操作确认覆盖：`pm uninstall` / `pm clear` / `pm disable`、`cmd package ...`、`rm -rf /sdcard`、`reboot` / `recovery`，以及靠引号绕过的变体（`pm "uninstall"`）。
 
 ## 已适配
 

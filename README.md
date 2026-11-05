@@ -10,7 +10,7 @@
 | 验证环境 | nubia REDMAGIC NX809J / Android 16 (SDK 36) / adb 34.0.4 |
 | 工具数 | 6 |
 | 需要 root | **不需要** |
-| 稳定性 | 10/10 稳定性套件 + 93/93 命令确认测试 |
+| 稳定性 | 10/10 稳定性套件 + 48/48 命令确认测试 |
 
 ---
 
@@ -265,7 +265,7 @@ adb_shell { command: "dumpsys battery | grep -E 'level|status'" }
 确认要执行的话，先跟用户说清后果，再带 confirm:true 重试。
 ```
 
-**`confirm` 的语义**：只有 `true` 才放行；`false` 和不传**完全等价**（都会被拒）。确认测试 93/93 通过。
+**`confirm` 的语义**：只有 `true` 才放行；`false` 和不传**完全等价**（都会被拒）。确认测试 48/48 通过。
 
 **直接放行的只读命令**：`ls cat head tail grep find(无-delete) wc du df getprop dumpsys logcat(无-c) ps id uname pm list|path|dump cmd package list settings get echo printf sleep` 等。
 
@@ -479,48 +479,34 @@ adb devices:
 
 ---
 
-## 九点五、命令确认机制（允许名单，默认拒绝）
+## 九点五、命令确认：一道刹车，不是安全边界
 
-**只有只读命令直接执行，其余一律要求 `confirm: true`。**
+**日常操作全部直接执行。只有几种"手滑一下就无法挽回"的操作需要 `confirm: true`。**
 
-这是**允许名单**，不是危险写法拦截名单。区别很重要：
+### 需要确认的（只有这几类）
 
-| | 拦截名单（旧） | 允许名单（现在） |
-|---|---|---|
-| 判据 | 枚举危险写法 | 只放行认得的只读命令 |
-| 遇到没见过的写法 | ❌ 放行（危险） | ✅ 要确认（安全） |
-| `setsid pm uninstall` | 绕过 | 要确认（`setsid` 不在白名单） |
-| `find . -delete` | 绕过 | 要确认（`find` 带 `-delete`） |
+| 操作 | 为什么 |
+|---|---|
+| `pm uninstall` / `pm clear` | 卸掉或清空应用，用户数据没了 |
+| `cmd package uninstall` / `clear` | 同上 |
+| `rm -rf` 打在 `/`、`/sdcard`、`/data`、`/system`、`/storage`、`~` 上 | 整盘或系统目录删除 |
+| `reboot` / `recovery` | 重启，正在做的事全中断 |
+| `dd of=/dev/block/...`、`mkfs` | 直接写裸分区、格式化 |
 
-**为什么换**：旧方案用正则枚举危险写法，五轮复核每轮都能找到新绕过（`setsid`、`$HOME`、`find -exec`、`sh -c --`、`printf | sh`、`rm -rf //`…）。shell 的写法是无穷的，枚举永远收敛不了。换成默认拒绝之后，**绕过在构造上不成立**——认不出的东西一律要确认。
-
-### 直接放行的（只读）
+### 直接执行的（其余全部）
 
 ```
-ls / cat / head / tail / grep / find(不带 -delete/-exec) / wc / du / df
-getprop / dumpsys / logcat(不带 -c) / ps / id / uname / date / free
+am start / am force-stop / input tap / settings put
+rm -f 单个文件 / rm -rf /tmp/build
 pm list / pm path / pm dump
-cmd package list|path|dump / cmd window
-settings get
-echo / printf / sleep
+getprop / dumpsys / logcat / screencap / find / curl / sh -c "echo hi" …
 ```
 
-### 需要 `confirm: true` 的（其余全部）
+**这不是安全边界。** 拿到 adb 权限的人本来就能做任何事；`confirm` 也是调用方自己填的布尔值，挡不住有意为之的操作。它的唯一作用是**防止模型误读指令，一下把数据删光**。
 
-```
-pm uninstall / clear / disable
-rm（任何形态，包括删单个文件）
-am start / input tap / settings put
-sh / bash / sudo / env / timeout / nice / eval / setsid / xargs …
-重定向写文件（echo x > /sdcard/f）
-任何认不出的命令（curl / wget / 自定义脚本）
-```
+已知能被绕过：把危险命令藏在引号里（`sh -c "pm uninstall x"`）、`eval`、变量拼接。**这没关系**——它不是用来防人的。
 
-**代价**：写操作多一个参数。这是有意的摩擦——这个工具能执行任意 shell，写操作本来就该明确确认。
-
-**拦不住什么**：`$(...)` 动态拼接、alias、自写脚本、以及**调用方不加判断地无脑传 `confirm: true`**。最后这条最重要：`confirm` 的含义是"已经跟用户说过后果并得到同意"，不是"跳过检查"。
-
----
+**`confirm` 的语义**：不是"跳过检查"，是"已经跟用户说过后果并得到同意"。
 
 ## 十、卸载与回滚
 

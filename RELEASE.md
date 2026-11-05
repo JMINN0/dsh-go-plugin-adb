@@ -8,7 +8,7 @@
 
 - 6 个工具：`adb_devices` / `adb_shell` / `adb_install` / `adb_logcat` / `adb_screencap` / `adb_reconnect`
 - 手机内回环连接（`127.0.0.1:5555`），关 WiFi 也能用
-- 命令确认机制（`pm uninstall` / `rm -rf /sdcard` / `reboot` 等需显式 `confirm: true`）
+- 不可逆操作确认（`pm uninstall` / `rm -rf /sdcard` / `reboot` 等需显式 `confirm: true`）
 - 端口自动协商（5555 → 6555 → 7555 → 8555 → 9555）
 - 断线自愈（`kill-server` / `disconnect` 后自动重连）
 
@@ -26,7 +26,7 @@
 ### 验证
 
 - 稳定性套件 10/10
-- 命令确认机制 93/93
+- 不可逆操作确认 48/48
 - 工具契约 6/6 通过宿主 `defineTool` 编译
 - 真实引擎 trial PASS
 - 从 GitHub 克隆后可正常注册 6 个工具
@@ -34,5 +34,5 @@
 ### 已知边界
 
 - 只在 Android 16 + adb 34.0.4 + nubia NX809J 上验证
-- 命令确认机制是"防手滑"，不是安全边界（`$(...)` 动态拼接、alias、自写脚本可绕过；`p""m` 这类拼接已能拦）
+- 不可逆操作确认是"防手滑"，不是安全边界（`$(...)` 动态拼接、alias、自写脚本可绕过；`p""m` 这类拼接已能拦）
 - 无 root，读不了 `/data/data`
