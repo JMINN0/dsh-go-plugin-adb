@@ -29,6 +29,12 @@ const BASE_PORT = Number(process.env.ADB_BASE_PORT || 5555);
 // 备选一律跳到这个区间之外。
 const FALLBACK_PORTS = [6555, 7555, 8555, 9555];
 
+/**
+ * mDNS 广播的端口要用哪个主机名去连。
+ * 无线调试广播的是局域网地址（如 192.168.10.19），不是回环——这台机器上回环连不上那个 TLS 端口。
+ */
+const MDNS_HOSTS = ['127.0.0.1', '172.19.0.1', '192.168.10.19'];
+
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 export async function adb(args, { timeout = 25000, target = null, maxBuffer = 32 * 1024 * 1024 } = {}) {
@@ -152,24 +158,38 @@ export async function ensure({ force = false } = {}) {
     }
   }
 
-  // 阶段二：直连全不通，但 mDNS 或已有条目找得到一条活连接 → 用它把端口固定下来。
-  const bootTarget = await findLiveTarget();
-
-  if (bootTarget) {
-    for (const port of cands) {
-      const target = `127.0.0.1:${port}`;
-      // tcpip 会让 adbd 在新端口重启，**原来那条 serial 当场失效**。
-      // 所以每轮都要重新找一条活连接，不能拿第一轮的 serial 一直用（否则第二轮起全是死连接）。
-      const live = (await findLiveTarget()) || bootTarget;
-      await adb(['-s', live, 'tcpip', String(port)], { timeout: 12000 });
-      await sleep(1200);
+  // 阶段二：直连不通时，**先试 mDNS 广播的 TLS 端口和已有设备条目**——这两种都不重启 adbd。
+  //
+  // 【重要历史】以前这里有一个 `adb tcpip <候选端口>` 的迁移循环，想"把端口固定到 5555"。
+  // 实测证明它会**重启 adbd**，当场杀掉 Shizuku（shizuku_server 及其所有用户服务）：
+  //   实验前 adbd=20723 / shizuku_server=23040 / GKD=23080
+  //   执行 adb tcpip 5555 → adbd=20469、shizuku_server 为空、GKD 用户服务为空
+  // 而且 TLS 端口会从 44197 变到 33271，别人的连接全断。
+  // 对照实验：`adb kill-server` + `start-server` 不会动 Shizuku。
+  //
+  // 结论：**插件永远不自动 tcpip**。adbd 是多个客户端共享的资源（Shizuku 在 adb 模式下
+  // 本身就是 adbd 的一个客户端），为了"自己连得方便"去重启它，等于把别人踢下线。
+  // 正确做法是搭车：adbd 挂在哪就review连哪，用 mDNS 自动发现，不改路。
+  for (const port of await mdnsPorts()) {
+    for (const host of MDNS_HOSTS) {
+      const target = `${host}:${port}`;
       await adb(['connect', target], { timeout: 8000 });
-      await sleep(400);
+      await sleep(350);
       if (await usable(target)) {
         const model = await adb(['shell', 'getprop', 'ro.product.model'], { target, timeout: 8000 });
         await state.save({ port, lastOkAt: Date.now(), misses: 0, lastError: '' });
-        return { ok: true, target, port, via: 'tcpip', model: model.out.trim(), devices: list };
+        return { ok: true, target, port, via: 'mdns', model: model.out.trim(), devices: list };
       }
+    }
+  }
+
+  // 阶段三：最后才试已有设备条目里那些已经处于 device 状态的 serial（也是搭车，不重启）
+  for (const d of list.filter((x) => x.state === 'device')) {
+    if (await usable(d.serial)) {
+      const model = await adb(['shell', 'getprop', 'ro.product.model'], { target: d.serial, timeout: 8000 });
+      const portNum = Number((d.serial.split(':')[1] || 0)) || st.port;
+      await state.save({ port: portNum, lastOkAt: Date.now(), misses: 0, lastError: '' });
+      return { ok: true, target: d.serial, port: portNum, via: 'existing', model: model.out.trim(), devices: list };
     }
   }
 
@@ -177,10 +197,15 @@ export async function ensure({ force = false } = {}) {
   const hint = [
     `连不上，已试过端口：${cands.join(', ')}`,
     '',
-    '一次性三步（只有第一次需要）：',
-    '1. apt-get install -y android-tools-adb',
-    '2. 手机：开发者选项 → 无线调试 → 打开，读出「配对码 + 端口」',
-    '3. adb pair 127.0.0.1:<端口>（输入配对码）→ adb connect 127.0.0.1:<端口> → adb tcpip 5555',
+    '最可能的原因：手机重启过，adbd 不在 5555 了（tcpip 不是持久设置）。',
+    '',
+    '请让用户做两步（不需要重新配对，密钥还在）：',
+    '1. 手机：设置 → 开发者选项 → 无线调试 → 确认是开着的',
+    '2. 读出页面上「IP 地址和端口」那个号（形如 192.168.10.19:44197，每次都变），告诉 AI',
+    '',
+    'AI 拿到端口后直接：adb connect <那个 IP:端口>',
+    '',
+    '注意：**不要用 adb tcpip 去"固定端口"**——它会重启 adbd，把 Shizuku 等其他客户端踢下线（已实测）。',
   ].join('\n');
   await state.save({ misses, lastErrorAt: Date.now(), lastError: 'no usable port' });
   return { ok: false, devices: list, hint, port: null };
