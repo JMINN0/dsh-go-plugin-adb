@@ -172,9 +172,8 @@ adb pair 192.168.1.100:37123
 adb connect 192.168.1.100:41000
 # Success shows: connected to 192.168.1.100:41000
 
-# 4. Fix the port to 5555 (this fails with "no devices/emulators found" if you skipped step 3)
-adb tcpip 5555
-# Success shows: restarting in TCP mode port: 5555
+# 4. Do NOT pin the port with 'adb tcpip 5555' -- it restarts adbd and drops
+#    every other adb client, Shizuku included. See the warning after this block.
 
 # 5. Connect over loopback (note: 127.0.0.1 here, not the LAN IP)
 adb connect 127.0.0.1:5555
