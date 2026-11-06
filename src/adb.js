@@ -20,6 +20,7 @@
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as state from './state.js';
+import { scanOpenPorts } from './scan.js';
 
 const pexec = promisify(execFile);
 const ADB_BIN = process.env.ADB_BIN || 'adb';
@@ -29,11 +30,6 @@ const BASE_PORT = Number(process.env.ADB_BASE_PORT || 5555);
 // 备选一律跳到这个区间之外。
 const FALLBACK_PORTS = [6555, 7555, 8555, 9555];
 
-/**
- * mDNS 广播的端口要用哪个主机名去连。
- * 无线调试广播的是局域网地址（如 192.168.10.19），不是回环——这台机器上回环连不上那个 TLS 端口。
- */
-const MDNS_HOSTS = ['127.0.0.1', '172.19.0.1', '192.168.10.19'];
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
@@ -135,10 +131,9 @@ export async function ensure({ force = false } = {}) {
 
   // 以前 force 一上来就 kill-server，会把别人（包括并发的自己）正在用的 server 踢掉。
   // 现在先试 start-server（幂等、不会打断已有连接），真的不行才轮到 kill-server。
-  if (force) {
-    const started = await adb(['start-server']);
-    if (!started.ok) await adb(['kill-server']);
-  }
+  // 不再 kill-server：它是 host 端共用的 server，杀掉会让并发的自己一起断。
+  // 实测 start-server 本身就能把没跑起来的 server 拉起来。
+  if (force) await adb(['start-server']);
   await adb(['start-server']);
 
   const { list } = await listDevices();
@@ -158,32 +153,29 @@ export async function ensure({ force = false } = {}) {
     }
   }
 
-  // 阶段二：直连不通时，**先试 mDNS 广播的 TLS 端口和已有设备条目**——这两种都不重启 adbd。
+  // 阶段二：直连不通 → **扫回环端口找出 adbd 的随机 TLS 端口**，再 connect。
   //
-  // 【重要历史】以前这里有一个 `adb tcpip <候选端口>` 的迁移循环，想"把端口固定到 5555"。
-  // 实测证明它会**重启 adbd**，当场杀掉 Shizuku（shizuku_server 及其所有用户服务）：
-  //   实验前 adbd=20723 / shizuku_server=23040 / GKD=23080
-  //   执行 adb tcpip 5555 → adbd=20469、shizuku_server 为空、GKD 用户服务为空
-  // 而且 TLS 端口会从 44197 变到 33271，别人的连接全断。
-  // 对照实验：`adb kill-server` + `start-server` 不会动 Shizuku。
+  // 【为什么不用 mDNS】两条路在这台机器上都堵死：
+  //   ① `adb mdns services` 实测返回空列表（3 次 × 25s 全空）
+  //   ② 自己发 mDNS 组播查询也收不到响应（proot 网络命名空间拿不到组播，实测 2.5s 超时空结果）
+  // 所以改成直接扫：连回环上没开的端口会被内核立刻拒绝，2 万个端口并发 400 实测约 6 秒。
   //
-  // 结论：**插件永远不自动 tcpip**。adbd 是多个客户端共享的资源（Shizuku 在 adb 模式下
-  // 本身就是 adbd 的一个客户端），为了"自己连得方便"去重启它，等于把别人踢下线。
-  // 正确做法是搭车：adbd 挂在哪就review连哪，用 mDNS 自动发现，不改路。
-  for (const port of await mdnsPorts()) {
-    for (const host of MDNS_HOSTS) {
-      const target = `${host}:${port}`;
-      await adb(['connect', target], { timeout: 8000 });
-      await sleep(350);
-      if (await usable(target)) {
-        const model = await adb(['shell', 'getprop', 'ro.product.model'], { target, timeout: 8000 });
-        await state.save({ port, lastOkAt: Date.now(), misses: 0, lastError: '' });
-        return { ok: true, target, port, via: 'mdns', model: model.out.trim(), devices: list };
-      }
+  // 【为什么绝不 tcpip】实测 `adb tcpip` 会重启 adbd，当场杀掉 Shizuku
+  // （adbd 20723→20469、shizuku_server 与 GKD 用户服务全部消失、TLS 端口 44197→33271）。
+  // adbd 是多客户端共享资源，为了自己连得方便去重启它等于把别人踢下线。这里只搭车，不改路。
+  const scanned = await scanOpenPorts();
+  for (const port of scanned) {
+    const target = `127.0.0.1:${port}`;
+    await adb(['connect', target], { timeout: 8000 });
+    await sleep(300);
+    if (await usable(target)) {
+      const model = await adb(['shell', 'getprop', 'ro.product.model'], { target, timeout: 8000 });
+      await state.save({ port, lastOkAt: Date.now(), misses: 0, lastError: '' });
+      return { ok: true, target, port, via: 'scan', model: model.out.trim(), devices: list };
     }
   }
 
-  // 阶段三：最后才试已有设备条目里那些已经处于 device 状态的 serial（也是搭车，不重启）
+  // 阶段三：最后试已有设备条目里已经处于 device 状态的 serial（也是搭车，不重启）
   for (const d of list.filter((x) => x.state === 'device')) {
     if (await usable(d.serial)) {
       const model = await adb(['shell', 'getprop', 'ro.product.model'], { target: d.serial, timeout: 8000 });
