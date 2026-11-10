@@ -25,9 +25,11 @@
     "README.md",
     "RELEASE.md",
     "STABILITY.md",
+    "assets",
     "bin",
     "cordis.patch.yml",
     "dsh.plugin.json",
+    "screenshots.json",
     "src",
     "test"
   ],
