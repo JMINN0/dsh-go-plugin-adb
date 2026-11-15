@@ -45,7 +45,39 @@
 2. **其他 adb 版本**（特别是 1.0.39 以下）
 3. **其他厂商 adbd**（三星、小米、Pixel 是否允许 `adb tcpip` 后回环连接）
 4. **Windows / macOS 主机**（本插件只针对手机内部 proot）
-5. **手机重启后的自动恢复**：`adb tcpip 5555` 不是持久设置，重启后要重开无线调试拿新端口
+5. **手机重启后的自动恢复**：`adb tcpip 5555` 不是持久设置，重启后要重开无线调试拿新端
+
+   **2026-11-16 补：已经从 `services.jar` 反编译确认了机制，不是猜的。**
+
+   `AdbService.systemReady()` 开机时做的是：
+   ```java
+   mIsAdbUsbEnabled  = getprop("persist.sys.usb.config") 含 "adb"
+   mIsAdbWifiEnabled = getprop("persist.adb.tls_server.enable") == "1"
+   putInt(adb_enabled,      mIsAdbUsbEnabled)      // settings 被属性覆盖
+   putInt(adb_wifi_enabled, mIsAdbWifiEnabled)
+   ```
+
+   **方向是「属性 → 设置」，不是反过来。** 所以：
+
+   | 属性 | 本机值 | 重启后 |
+   |---|---|---|
+   | `persist.sys.usb.config` | `adb` | adbd 以 **USB 模式**启动 |
+   | `service.adb.tcp.port` | `5555` | **清零**（运行时属性） |
+   | `persist.adb.tcp.port` | 空 | 写不进去，SELinux 拒绝 `setprop` |
+
+   **结果：重启后 127.0.0.1:5555 不通，插件连不上，必须人工救一次。**
+
+   补救只有两条：插 USB 线到电脑，或者手动开无线调试。
+
+   **手改 `adb_wifi_enabled` 是无效的**（实测过）：写进去了，但
+   `service.adb.tls.port` 始终为空，`dumpsys adb` 里也没有无线调试端口。
+   因为这个设置只是属性的「影子」，改了影子不会驱动本体。`cmd adb` 也没有
+   enable 子命令，`setprop persist.adb.tls_server.enable 1` 被 SELinux 拒。
+   **无线调试的开关只能由 Settings 走 AdbManager 的服务调用打开。**
+
+   反过来说：**只要用 UI 打开过一次无线调试，`persist.adb.tls_server.enable=1`
+   会持久，下次开机会自动恢复无线调试。** 但无线调试依赖 WiFi 连着，
+   WiFi 断了就没了 —— 这也是插件默认走回环的原因。口
 6. **600 秒超时是否真能跑满**（只测了 3 秒命令配 300 秒超时）
 7. **`reboot` 是否真能执行**（只核到权限已授予，没敢触发）
 
