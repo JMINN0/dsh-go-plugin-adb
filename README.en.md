@@ -22,22 +22,34 @@ so the fair question is why this plugin exists. Because the built-in one has fou
 | | Built-in `android_shell` | This plugin |
 |---|---|---|
 | **Per-command approval** | **Every command needs a native confirmation card** | **None** |
-| **Timeout** | **30s, 60s max** | **Unlimited** -- long scripts, `logcat` tails, batch work |
+| **Timeout** | **30s, 60s max** | **Unlimited** |
 | **Command size** | **2048 UTF-8 bytes** | Unlimited |
 | **Output size** | 64 KiB total, truncated | 32 MB |
-| **Connection** | Self-ADB needs **wireless debugging**, random port bound to the Wi-Fi interface | **`adb tcpip 5555` bound to loopback**, survives Wi-Fi off and airplane mode |
-| **Screen state** | Dies when the screen sleeps or the task ends | Unaffected |
 
 **In one line**: the built-in one suits "run a command occasionally"; this one suits "let an
 agent operate the phone continuously, for a long time, without being interrupted".
 
-> **The last two rows are the real difference.** Self-ADB goes through wireless debugging and
-> its port is bound to the Wi-Fi interface -- kill Wi-Fi, leave the house, and it is gone. This
-> plugin talks to `127.0.0.1:5555` over loopback. Verified: with Wi-Fi off and airplane mode on,
-> `adb -s 127.0.0.1:5555 shell` still works.
+### The difference that matters more: it does not disturb your existing adb clients
 
-If you only want the AI to run a `dumpsys` now and then, the built-in tool is enough.
-If you want continuous operation, long tasks, or use away from Wi-Fi, install this.
+Self-ADB makes you enable wireless debugging and enter a pairing code. This plugin **never
+restarts adbd and never changes the port** -- it rides along on whatever connection exists:
+
+- If you already connected through Shizuku, GKD or anything else, this plugin **will not kick
+  them offline**
+- `ensure()` **never calls `adb tcpip`**, because that restarts adbd and takes Shizuku's
+  adb-mode service down with it (measured: before `adb tcpip 5555`, shizuku_server=23040 and
+  GKD user service=23080; afterwards both were gone)
+
+That is the easiest trap to fall into in practice. See section 8.
+
+### The AI reads the pairing code itself
+
+The built-in route expects you to read the code off the screen and tell the AI. But **by the
+time you have typed it, the dialog has refreshed** -- switching to the chat background
+invalidates the code, and you can retry forever without pairing.
+
+This plugin has the AI screenshot the dialog, OCR the pairing code and port, and pair itself.
+No human-in-the-middle step at all. See section 5.
 
 ---
 
