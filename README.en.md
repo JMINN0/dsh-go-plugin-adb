@@ -14,6 +14,33 @@ English ｜ [中文](README.md)
 
 ---
 
+## 0. How this differs from the app's built-in Android Shell
+
+**DSH Go already ships an `android_shell` tool** (Settings -> Phone control -> Android Shell),
+so the fair question is why this plugin exists. Because the built-in one has four limits:
+
+| | Built-in `android_shell` | This plugin |
+|---|---|---|
+| **Per-command approval** | **Every command needs a native confirmation card** | **None** |
+| **Timeout** | **30s, 60s max** | **Unlimited** -- long scripts, `logcat` tails, batch work |
+| **Command size** | **2048 UTF-8 bytes** | Unlimited |
+| **Output size** | 64 KiB total, truncated | 32 MB |
+| **Connection** | Self-ADB needs **wireless debugging**, random port bound to the Wi-Fi interface | **`adb tcpip 5555` bound to loopback**, survives Wi-Fi off and airplane mode |
+| **Screen state** | Dies when the screen sleeps or the task ends | Unaffected |
+
+**In one line**: the built-in one suits "run a command occasionally"; this one suits "let an
+agent operate the phone continuously, for a long time, without being interrupted".
+
+> **The last two rows are the real difference.** Self-ADB goes through wireless debugging and
+> its port is bound to the Wi-Fi interface -- kill Wi-Fi, leave the house, and it is gone. This
+> plugin talks to `127.0.0.1:5555` over loopback. Verified: with Wi-Fi off and airplane mode on,
+> `adb -s 127.0.0.1:5555 shell` still works.
+
+If you only want the AI to run a `dumpsys` now and then, the built-in tool is enough.
+If you want continuous operation, long tasks, or use away from Wi-Fi, install this.
+
+---
+
 ## 1. What this is
 
 DSH Go runs inside a proot Ubuntu on an Android phone. This plugin lets it use `adb` commands to operate **the very phone it lives on**: install and uninstall packages, read logcat, run arbitrary shell commands (uid 2000), take screenshots, inspect system state.
